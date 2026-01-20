@@ -1,0 +1,180 @@
+{
+    "info": {
+      "_postman_id": "lms-service-collection",
+      "name": "LMS Service APIs",
+      "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "item": [
+      {
+        "name": "Health Check",
+        "request": {
+          "method": "GET",
+          "header": [],
+          "url": {
+            "raw": "{{base_url}}/health-check",
+            "host": ["{{base_url}}"],
+            "path": ["health-check"]
+          }
+        }
+      },
+      {
+        "name": "Create Branch",
+        "request": {
+          "method": "POST",
+          "header": [{ "key": "Content-Type", "value": "application/json" }],
+          "body": {
+            "mode": "raw",
+            "raw": "{\n  \"org_id\": \"ORG-123\",\n  \"name\": \"Mumbai Branch\",\n  \"address\": \"123 Main Street\",\n  \"branch_code\": \"MB01\"\n}"
+          },
+          "url": {
+            "raw": "{{base_url}}/v1/branches",
+            "host": ["{{base_url}}"],
+            "path": ["v1","branches"]
+          }
+        }
+      },
+      {
+        "name": "Get All Branches",
+        "request": {
+          "method": "GET",
+          "header": [],
+          "url": {
+            "raw": "{{base_url}}/v1/branches?org_id=ORG-123",
+            "host": ["{{base_url}}"],
+            "path": ["v1","branches"],
+            "query": [{ "key": "org_id", "value": "ORG-123" }]
+          }
+        }
+      },
+      {
+        "name": "Get Branch By ID",
+        "request": {
+          "method": "GET",
+          "header": [],
+          "url": {
+            "raw": "{{base_url}}/v1/branches/BR-1765884942220-32240",
+            "host": ["{{base_url}}"],
+            "path": ["v1","branches","BR-1765884942220-32240"]
+          }
+        }
+      },
+      {
+        "name": "Get Branch Summary",
+        "request": {
+          "method": "GET",
+          "header": [],
+          "url": {
+            "raw": "{{base_url}}/v1/branches/BR-1765884942220-32240/summary",
+            "host": ["{{base_url}}"],
+            "path": ["v1","branches","BR-1765884942220-32240","summary"]
+          }
+        }
+      },
+      {
+        "name": "Update Branch",
+        "request": {
+          "method": "PATCH",
+          "header": [{ "key": "Content-Type", "value": "application/json" }],
+          "body": {
+            "mode": "raw",
+            "raw": "{\n  \"name\": \"Mumbai Branch Updated\",\n  \"address\": \"456 New Street\"\n}"
+          },
+          "url": {
+            "raw": "{{base_url}}/v1/branches/BR-1765884942220-32240",
+            "host": ["{{base_url}}"],
+            "path": ["v1","branches","BR-1765884942220-32240"]
+          }
+        }
+      },
+      {
+        "name": "Delete Branch",
+        "request": {
+          "method": "DELETE",
+          "header": [],
+          "url": {
+            "raw": "{{base_url}}/v1/branches/BR-1765884942220-32240",
+            "host": ["{{base_url}}"],
+            "path": ["v1","branches","BR-1765884942220-32240"]
+          }
+        }
+      },
+      {
+        "name": "Create Cabinet",
+        "request": {
+          "method": "POST",
+          "header": [{ "key": "Content-Type", "value": "application/json" }],
+          "body": {
+            "mode": "raw",
+            "raw": "{\n  \"branch_id\": \"BR-1765884942220-32240\",\n  \"name\": \"Cabinet-AXL\",\n  \"height\": 8,\n  \"width\": 7,\n  \"depth\": 2.5\n}"
+          },
+          "url": {
+            "raw": "{{base_url}}/v1/cabinets",
+            "host": ["{{base_url}}"],
+            "path": ["v1","cabinets"]
+          }
+        }
+      },
+      {
+        "name": "Get Cabinets By Branch",
+        "request": {
+          "method": "GET",
+          "header": [],
+          "url": {
+            "raw": "{{base_url}}/v1/cabinets?branch_id=BR-1765884942220-32240",
+            "host": ["{{base_url}}"],
+            "path": ["v1","cabinets"],
+            "query": [{ "key": "branch_id", "value": "BR-1765884942220-32240" }]
+          }
+        }
+      },
+      {
+        "name": "Create Locker",
+        "request": {
+          "method": "POST",
+          "header": [{ "key": "Content-Type", "value": "application/json" }],
+          "body": {
+            "mode": "raw",
+            "raw": "{\n  \"cabinet_id\": \"CAB-1765884942220-12345\",\n  \"label\": \"L1\",\n  \"height\": 1,\n  \"width\": 1\n}"
+          },
+          "url": {
+            "raw": "{{base_url}}/v1/lockers",
+            "host": ["{{base_url}}"],
+            "path": ["v1","lockers"]
+          }
+        }
+      },
+      {
+        "name": "Get Lockers By Cabinet",
+        "request": {
+          "method": "GET",
+          "header": [],
+          "url": {
+            "raw": "{{base_url}}/v1/lockers?cabinet_id=CAB-1765884942220-12345",
+            "host": ["{{base_url}}"],
+            "path": ["v1","lockers"],
+            "query": [{ "key": "cabinet_id", "value": "CAB-1765884942220-12345" }]
+          }
+        }
+      },
+      {
+        "name": "Book Locker",
+        "request": {
+          "method": "PATCH",
+          "header": [{ "key": "Content-Type", "value": "application/json" }],
+          "body": {
+            "mode": "raw",
+            "raw": "{\n  \"booking_id\": \"BOOK-123\"\n}"
+          },
+          "url": {
+            "raw": "{{base_url}}/v1/lockers/LOCKER-1765884320577-10725/book",
+            "host": ["{{base_url}}"],
+            "path": ["v1","lockers","LOCKER-1765884320577-10725","book"]
+          }
+        }
+      }
+    ],
+    "variable": [
+      { "key": "base_url", "value": "http://localhost:3000" }
+    ]
+  }
+  

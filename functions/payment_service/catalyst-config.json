@@ -1,0 +1,13 @@
+{
+	"deployment": {
+		"name": "payment_service",
+		"stack": "node20",
+		"type": "advancedio",
+		"env_variables": {
+			"CLIENT_URL": "https://lms-60040289923.development.catalystserverless.in/app/index.html#/payment"
+		}
+	},
+	"execution": {
+		"main": "index.js"
+	}
+}

@@ -1,0 +1,11 @@
+{
+	"name": "lead_generation",
+	"version": "1.0.0",
+	"main": "index.js",
+	"author": "catalystadmin@dsv360.ai",
+	"dependencies": {
+		"zcatalyst-sdk-node": "latest",
+		"cors": "^2.8.5",
+		"express": "^5.2.1"
+	}
+}

@@ -1,0 +1,144 @@
+{
+    "info": {
+      "_postman_id": "a9b8e12d-4f4e-4f7e-bc6d-2d0f9c8e1001",
+      "name": "Customer Service - Locker Management",
+      "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+      "description": "Customer-facing APIs for Locker Management System (Zoho Catalyst)"
+    },
+    "variable": [
+      {
+        "key": "base_url",
+        "value": "http://localhost:3000/server/customer_service",
+        "type": "string"
+      },
+      {
+        "key": "tenant_id",
+        "value": "TENANT_001",
+        "type": "string"
+      },
+      {
+        "key": "branchId",
+        "value": "",
+        "type": "string"
+      },
+      {
+        "key": "lockerId",
+        "value": "",
+        "type": "string"
+      },
+      {
+        "key": "bookingId",
+        "value": "",
+        "type": "string"
+      },
+      {
+        "key": "appointmentId",
+        "value": "",
+        "type": "string"
+      }
+    ],
+    "item": [
+      {
+        "name": "Health Check",
+        "request": {
+          "method": "GET",
+          "url": "{{base_url}}/health"
+        }
+      },
+      {
+        "name": "Get All Branches",
+        "request": {
+          "method": "GET",
+          "header": [
+            {
+              "key": "x-tenant-id",
+              "value": "{{tenant_id}}"
+            }
+          ],
+          "url": "{{base_url}}/customers/branches"
+        }
+      },
+      {
+        "name": "Get Branch Details (Cabinets & Lockers)",
+        "request": {
+          "method": "GET",
+          "header": [
+            {
+              "key": "x-tenant-id",
+              "value": "{{tenant_id}}"
+            }
+          ],
+          "url": "{{base_url}}/customers/branches/{{branchId}}/details"
+        }
+      },
+      {
+        "name": "Book Locker",
+        "request": {
+          "method": "POST",
+          "header": [
+            {
+              "key": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "key": "x-tenant-id",
+              "value": "{{tenant_id}}"
+            }
+          ],
+          "body": {
+            "mode": "raw",
+            "raw": "{\n  \"lockerId\": \"{{lockerId}}\",\n  \"months\": 6\n}"
+          },
+          "url": "{{base_url}}/customers/bookings"
+        }
+      },
+      {
+        "name": "Get Booking Details",
+        "request": {
+          "method": "GET",
+          "header": [
+            {
+              "key": "x-tenant-id",
+              "value": "{{tenant_id}}"
+            }
+          ],
+          "url": "{{base_url}}/customers/bookings/{{bookingId}}"
+        }
+      },
+      {
+        "name": "Book Appointment (Generate Visit Key)",
+        "request": {
+          "method": "POST",
+          "header": [
+            {
+              "key": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "key": "x-tenant-id",
+              "value": "{{tenant_id}}"
+            }
+          ],
+          "body": {
+            "mode": "raw",
+            "raw": "{\n  \"bookingId\": \"{{bookingId}}\",\n  \"visitDateTime\": \"2025-01-10T11:00:00\"\n}"
+          },
+          "url": "{{base_url}}/customers/appointments"
+        }
+      },
+      {
+        "name": "Get Appointment Details",
+        "request": {
+          "method": "GET",
+          "header": [
+            {
+              "key": "x-tenant-id",
+              "value": "{{tenant_id}}"
+            }
+          ],
+          "url": "{{base_url}}/customers/appointments/{{appointmentId}}"
+        }
+      }
+    ]
+  }
+  
