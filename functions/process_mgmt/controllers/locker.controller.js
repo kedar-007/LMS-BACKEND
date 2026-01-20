@@ -1,6 +1,7 @@
 const service = require("../services/locker.service");
 const { successResponse, errorResponse } = require("../utils/response");
 
+// -------------------- Normal Lockers --------------------
 exports.createLocker = async (req, res) => {
   try {
     const locker = await service.createLocker(req);
@@ -50,6 +51,46 @@ exports.bookLocker = async (req, res) => {
   try {
     const result = await service.bookLocker(req);
     return successResponse(res, "Locker booked successfully", result);
+  } catch (e) {
+    return errorResponse(res, e.message, 400);
+  }
+};
+
+// -------------------- Industry Lockers --------------------
+exports.createIndustryLocker = async (req, res) => {
+  try {
+    const result = await service.createIndustryLocker(req);
+    return successResponse(res, "Locker Structure Created", result);
+  } catch (e) {
+    return errorResponse(res, e.message, 400);
+  }
+};
+
+// Step-1 (dropdown list)
+exports.listIndustryLockers = async (req, res) => {
+  try {
+    const result = await service.getIndustryLockers(req);
+    return successResponse(res, "Locker Structures Fetched", result);
+  } catch (e) {
+    return errorResponse(res, e.message, 400);
+  }
+};
+
+// Step-2 (cabinet sizes/models)
+exports.listIndustryLockerCabinets = async (req, res) => {
+  try {
+    const result = await service.getIndustryLockerCabinets(req);
+    return successResponse(res, "Cabinet Sizes Fetched", result);
+  } catch (e) {
+    return errorResponse(res, e.message, 400);
+  }
+};
+
+// Step-3 (model details)
+exports.getIndustryLockerCabinetDetails = async (req, res) => {
+  try {
+    const result = await service.getIndustryLockerCabinetDetails(req);
+    return successResponse(res, "Cabinet Detail Fetched", result);
   } catch (e) {
     return errorResponse(res, e.message, 400);
   }

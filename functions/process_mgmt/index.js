@@ -5,7 +5,8 @@ const cabinetRoutes = require("./routes/cabinet.routes");
 const lockerRoutes = require("./routes/locker.routes");
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
 app.use("/v1/branches", branchRoutes);
 app.use("/v1/cabinets", cabinetRoutes);
