@@ -288,12 +288,14 @@ exports.getIndustryLockers = async (req) => {
 
   console.log("🔥 getIndustryLockers (dropdown)");
   const rows = await zcql.executeZCQLQuery(
-    `SELECT ROWID, name FROM industry_lockers ORDER BY ROWID DESC`
+    `SELECT ROWID, name ,logo_url FROM industry_lockers ORDER BY ROWID DESC`
   );
+
+  console.log("ROWS---",rows);
 
   const result = (rows || []).map((r) => {
     const row = unwrapZcqlRow(r) || {};
-    return { rowId: String(row.ROWID), name: row.name };
+    return { rowId: String(row.ROWID), name: row.name,logo_url:row.logo_url };
   });
 
   console.log("✅ industry lockers count:", result.length);
@@ -312,7 +314,9 @@ exports.getIndustryLockerCabinets = async (req) => {
   console.log("🔥 getIndustryLockerCabinets rowId=", rowId);
 
   const record = await ds.table("industry_lockers").getRow(rowId);
+  console.log("RECORD--",record);
   const raw = String(record?.configuration || "");
+  
 
   console.log("   configLen=", raw.length);
   if (isTruncatedJsonString(raw)) throw new Error("Configuration truncated. Use CLOB/Large Text.");
