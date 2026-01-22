@@ -22,7 +22,9 @@ function safeJsonParse(v) {
 function normalizePayload(configObj) {
   if (!configObj) return null;
   if (typeof configObj === "object" && !Array.isArray(configObj)) {
-    const key = Object.keys(configObj).find((k) => k.toLowerCase() === "payload");
+    const key = Object.keys(configObj).find(
+      (k) => k.toLowerCase() === "payload"
+    );
     return key ? configObj[key] : configObj;
   }
   return null;
@@ -51,7 +53,10 @@ function parseConfiguration(raw) {
 function isTruncatedJsonString(raw) {
   const t = String(raw || "").trim();
   if (!t) return false;
-  return (t.startsWith("{") || t.startsWith("[")) && !(t.endsWith("}") || t.endsWith("]"));
+  return (
+    (t.startsWith("{") || t.startsWith("[")) &&
+    !(t.endsWith("}") || t.endsWith("]"))
+  );
 }
 
 function toStr(v) {
@@ -147,7 +152,7 @@ async function createCabinetsAndLockers(req, payload, industryName) {
         depth: toStr(model.depth),
         status: toStr(model.status) || "STANDARD",
         org_id: null,
-        branch_id: null
+        branch_id: null,
       };
 
       console.log("   🧾 cabinet insert payload:", cabinetInsertPayload);
@@ -163,7 +168,9 @@ async function createCabinetsAndLockers(req, payload, industryName) {
       // ✅ LOCKERS schema EXACT (your schema)
       const lockers = Array.isArray(model.lockers) ? model.lockers : [];
       const modelLockerDepth = toNum(model?.locker_internal_depth); // comes from cabinet level
-      console.log(`🔐 inserting lockers for cabinetId=${cabinetId} count=${lockers.length}`);
+      console.log(
+        `🔐 inserting lockers for cabinetId=${cabinetId} count=${lockers.length}`
+      );
       console.log(`   📏 model locker_internal_depth =`, modelLockerDepth);
 
       const lockerRows = lockers.map((l, i) => {
@@ -177,7 +184,7 @@ async function createCabinetsAndLockers(req, payload, industryName) {
           console.log("   🧪 sample locker depth resolve:", {
             lockerProvided: l?.locker_internal_depth,
             modelProvided: model?.locker_internal_depth,
-            finalUsed: resolvedDepth
+            finalUsed: resolvedDepth,
           });
         }
 
@@ -193,7 +200,7 @@ async function createCabinetsAndLockers(req, payload, industryName) {
           price: toInt(l?.price),
           locker_internal_depth: resolvedDepth, // ✅ FIXED
           row_thickness: toNum(l?.row_thickness),
-          thickness: toNum(l?.thickness)
+          thickness: toNum(l?.thickness),
         };
       });
 
@@ -201,13 +208,19 @@ async function createCabinetsAndLockers(req, payload, industryName) {
       let insertedCount = 0;
 
       for (let c = 0; c < chunks.length; c++) {
-        console.log(`   📦 lockers chunk ${c + 1}/${chunks.length} size=${chunks[c].length}`);
+        console.log(
+          `   📦 lockers chunk ${c + 1}/${chunks.length} size=${
+            chunks[c].length
+          }`
+        );
         const inserted = await insertLockersBatch(lockerTable, chunks[c]);
         insertedCount += inserted.length;
       }
 
       totalLockersCreated += insertedCount;
-      console.log(`✅ Lockers inserted for cabinetId=${cabinetId} inserted=${insertedCount}`);
+      console.log(
+        `✅ Lockers inserted for cabinetId=${cabinetId} inserted=${insertedCount}`
+      );
     }
   }
 
@@ -236,10 +249,15 @@ exports.createIndustryLocker = async (req) => {
   if (!name) throw new Error("name is required");
   if (!payload) throw new Error("payload is required");
 
-  const parsed = typeof payload === "object" ? payload : parseConfiguration(payload);
+  const parsed =
+    typeof payload === "object" ? payload : parseConfiguration(payload);
   const normalized = normalizePayload(parsed);
 
-  if (!normalized || typeof normalized !== "object" || Array.isArray(normalized)) {
+  if (
+    !normalized ||
+    typeof normalized !== "object" ||
+    Array.isArray(normalized)
+  ) {
     throw new Error(
       "Payload must be object like { groupName: [cabinets...] } or { payload: {...} }"
     );
@@ -248,17 +266,22 @@ exports.createIndustryLocker = async (req) => {
   console.log("✅ Parsed payload groups:", Object.keys(normalized));
 
   // 1) Create cabinets + lockers first
-  const { cabinetIds, totalLockersCreated } =
-    await createCabinetsAndLockers(req, normalized, name);
+  const { cabinetIds, totalLockersCreated } = await createCabinetsAndLockers(
+    req,
+    normalized,
+    name
+  );
 
   // 2) Save cabinetIds in industry_lockers configuration
   const configObj = {
     industryName: name,
     cabinetIds,
-    createdAt: new Date().toISOString()
+    createdAt: new Date().toISOString(),
   };
 
-  const configuration = storeCompressed ? encodeGzJson(configObj) : JSON.stringify(configObj);
+  const configuration = storeCompressed
+    ? encodeGzJson(configObj)
+    : JSON.stringify(configObj);
 
   console.log("🧾 saving industry_lockers row");
   console.log("   configObj:", configObj);
@@ -274,7 +297,7 @@ exports.createIndustryLocker = async (req) => {
     rowId: row.ROWID,
     cabinetsCreated: cabinetIds.length,
     lockersCreated: totalLockersCreated,
-    cabinetIds
+    cabinetIds,
   };
 };
 
@@ -291,11 +314,11 @@ exports.getIndustryLockers = async (req) => {
     `SELECT ROWID, name ,logo_url FROM industry_lockers ORDER BY ROWID DESC`
   );
 
-  console.log("ROWS---",rows);
+  console.log("ROWS---", rows);
 
   const result = (rows || []).map((r) => {
     const row = unwrapZcqlRow(r) || {};
-    return { rowId: String(row.ROWID), name: row.name,logo_url:row.logo_url };
+    return { rowId: String(row.ROWID), name: row.name, logo_url: row.logo_url };
   });
 
   console.log("✅ industry lockers count:", result.length);
@@ -308,60 +331,103 @@ exports.getIndustryLockers = async (req) => {
 
 exports.getIndustryLockerCabinets = async (req) => {
   const rowId = ensureRowId(req.params.rowId);
-  const ds = catalystApp(req).datastore();
-  const zcql  = catalystApp(req).zcql();
+  const app = catalystApp(req);
+  const ds = app.datastore();
+  const zcql = app.zcql();
 
-  console.log("🔥 getIndustryLockerCabinets rowId=", rowId);
+  console.log("🔥 getIndustryLockerCabinets rowId =", rowId);
 
+  // 1️⃣ Fetch industry record
   const record = await ds.table("industry_lockers").getRow(rowId);
-  console.log("RECORD--",record);
-  const raw = String(record?.configuration || "");
-  
 
-  console.log("   configLen=", raw.length);
-  if (isTruncatedJsonString(raw)) throw new Error("Configuration truncated. Use CLOB/Large Text.");
+  const rawConfig = String(record?.configuration || "");
+  if (isTruncatedJsonString(rawConfig)) {
+    throw new Error("Configuration truncated. Use CLOB / Large Text.");
+  }
 
-  const config = parseConfiguration(raw);
-  const cabinetIds = Array.isArray(config?.cabinetIds) ? config.cabinetIds : [];
+  const config = parseConfiguration(rawConfig);
+  const cabinetIds = Array.isArray(config?.cabinetIds)
+    ? config.cabinetIds.map((id) => String(id).trim())
+    : [];
 
-  console.log("   cabinetIds=", cabinetIds.length);
-  if (!cabinetIds.length) return { rowId, industryName: record?.name, cabinets: [] };
+  // console.log("📦 Cabinet IDs from config:", cabinetIds);
 
+  if (!cabinetIds.length) {
+    return {
+      rowId,
+      industryName: record?.name,
+      cabinets: [],
+    };
+  }
+
+  // Fetch cabinets safely (NO IN)
   const cabinets = [];
-  const chunks = chunkArray(cabinetIds, 100);
+  const foundIds = new Set();
 
-  for (let i = 0; i < chunks.length; i++) {
-    const ids = chunks[i].map((x) => Number(String(x))).filter((n) => Number.isFinite(n));
-    if (!ids.length) continue;
+  for (const cabinetId of cabinetIds) {
+    if (!/^\d+$/.test(cabinetId)) {
+      console.warn("⚠️ Invalid cabinet ID skipped:", cabinetId);
+      continue;
+    }
 
-    const q = `SELECT ROWID, name, width, height, depth FROM cabinets WHERE ROWID IN (${ids.join(",")})`;
-    console.log(`   🧾 ZCQL cabinets chunk ${i + 1}/${chunks.length}:`, q);
+    const query = `
+      SELECT ROWID, name, width, height, depth
+      FROM cabinets
+      WHERE ROWID = ${cabinetId}
+    `;
 
-    const rows = await zcql.executeZCQLQuery(q);
-    rows.forEach((r) => {
-      const cab = unwrapZcqlRow(r) || {};
-      cabinets.push({
-        cabinetId: String(cab.ROWID),
-        cabinetName: cab.name,
-        width: cab.width,
-        height: cab.height,
-        depth: cab.depth
-      });
+    const res = await zcql.executeZCQLQuery(query);
+
+    if (!res || !res.length) {
+      console.warn("❌ Cabinet not found for ID:", cabinetId);
+      continue;
+    }
+
+    const cab = unwrapZcqlRow(res[0]);
+    foundIds.add(cabinetId);
+
+    cabinets.push({
+      cabinetId: String(cab.ROWID),
+      cabinetName: cab.name,
+      width: cab.width,
+      height: cab.height,
+      depth: cab.depth,
     });
   }
 
-  // add totalLockers
+  console.log(`✅ Cabinets fetched: ${cabinets.length}/${cabinetIds.length}`);
+
+  // 3️⃣ Fetch locker counts (NO IN, NO N+1)
+  const lockerCounts = {};
+
   for (const c of cabinets) {
-    const q = `SELECT COUNT(ROWID) as cnt FROM lockers WHERE cabinet_id = ${Number(c.cabinetId)}`;
-    const res = await zcql.executeZCQLQuery(q);
+    const countQuery = `
+      SELECT COUNT(ROWID) AS cnt
+      FROM lockers
+      WHERE cabinet_id = ${c.cabinetId}
+    `;
+
+    const res = await zcql.executeZCQLQuery(countQuery);
     const row = unwrapZcqlRow(res?.[0]) || {};
-    c.totalLockers = Number(row.cnt || 0);
+
+    lockerCounts[c.cabinetId] = Number(row.cnt || 0);
+  }
+
+  // 4️⃣ Attach locker counts
+  cabinets.forEach((c) => {
+    c.totalLockers = lockerCounts[c.cabinetId] || 0;
+  });
+
+  // 5️⃣ Log missing cabinets
+  const missingCabinets = cabinetIds.filter((id) => !foundIds.has(id));
+  if (missingCabinets.length) {
+    console.warn("🚨 Missing cabinet IDs:", missingCabinets);
   }
 
   return {
     rowId,
     industryName: record?.name,
-    cabinets
+    cabinets,
   };
 };
 
@@ -374,25 +440,35 @@ exports.getIndustryLockerCabinetDetails = async (req) => {
   const cabinetId = ensureRowId(req.params.cabinetId); // ✅ cabinetId from route
 
   const ds = catalystApp(req).datastore();
-  const zcql  = catalystApp(req).zcql();
+  const zcql = catalystApp(req).zcql();
 
-  console.log("🔥 getIndustryLockerCabinetDetails rowId=", rowId, "cabinetId=", cabinetId);
+  // console.log(
+  //   "🔥 getIndustryLockerCabinetDetails rowId=",
+  //   rowId,
+  //   "cabinetId=",
+  //   cabinetId
+  // );
 
   // 1) read industry_lockers config
   const record = await ds.table("industry_lockers").getRow(rowId);
   const raw = String(record?.configuration || "");
 
   console.log("   configLen=", raw.length);
-  if (isTruncatedJsonString(raw)) throw new Error("Configuration truncated. Use CLOB/Large Text.");
+  if (isTruncatedJsonString(raw))
+    throw new Error("Configuration truncated. Use CLOB/Large Text.");
 
   const config = parseConfiguration(raw);
-  const cabinetIds = Array.isArray(config?.cabinetIds) ? config.cabinetIds.map(String) : [];
+  const cabinetIds = Array.isArray(config?.cabinetIds)
+    ? config.cabinetIds.map(String)
+    : [];
 
   console.log("   linked cabinetIds count=", cabinetIds.length);
 
   // 2) validate cabinetId belongs to this industry locker
   if (!cabinetIds.includes(String(cabinetId))) {
-    throw new Error(`This cabinetId=${cabinetId} is not linked to industry rowId=${rowId}`);
+    throw new Error(
+      `This cabinetId=${cabinetId} is not linked to industry rowId=${rowId}`
+    );
   }
 
   // 3) fetch cabinet
@@ -428,7 +504,7 @@ exports.getIndustryLockerCabinetDetails = async (req) => {
       row_thickness: l.row_thickness,
       thickness: l.thickness,
       status: l.status,
-      book_id: l.book_id
+      book_id: l.book_id,
     };
   });
 
@@ -443,9 +519,9 @@ exports.getIndustryLockerCabinetDetails = async (req) => {
       name: cab.name,
       width: cab.width,
       height: cab.height,
-      depth: cab.depth
+      depth: cab.depth,
     },
-    lockers
+    lockers,
   };
 };
 
@@ -489,10 +565,16 @@ exports.getLockerById = async (req) =>
   catalystApp(req).datastore().table("lockers").getRow(req.params.id);
 
 exports.updateLocker = async (req) =>
-  catalystApp(req).datastore().table("lockers").updateRow({ ROWID: req.params.id, ...req.body });
+  catalystApp(req)
+    .datastore()
+    .table("lockers")
+    .updateRow({ ROWID: req.params.id, ...req.body });
 
 exports.deleteLocker = async (req) =>
-  catalystApp(req).datastore().table("lockers").updateRow({ ROWID: req.params.id, status: "inactive" });
+  catalystApp(req)
+    .datastore()
+    .table("lockers")
+    .updateRow({ ROWID: req.params.id, status: "inactive" });
 
 exports.bookLocker = async (req) => {
   const { lockerId } = req.params;
