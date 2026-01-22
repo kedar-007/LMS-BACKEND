@@ -1,26 +1,12 @@
+// services/locker.service.js
 const catalystApp = require("../utils/catalyst");
+const zlib = require("zlib");
 
-// -------------------- helpers --------------------
-function unwrapZcqlRow(obj) {
-  const key = Object.keys(obj || {})[0];
-  return key ? obj[key] : null;
-}
+/* -------------------- helpers -------------------- */
 
 function ensureRowId(rowId) {
   if (!rowId || !/^\d+$/.test(String(rowId))) throw new Error("Invalid rowId");
   return String(rowId);
-}
-
-function escapeZcqlString(value) {
-  return String(value).replace(/'/g, "''");
-}
-
-function decodeParam(v) {
-  try {
-    return decodeURIComponent(v);
-  } catch {
-    return v;
-  }
 }
 
 function safeJsonParse(v) {
@@ -33,220 +19,437 @@ function safeJsonParse(v) {
   }
 }
 
-/**
- * normalizePayload:
- * - if you accidentally stored wrapper objects like { name, payload } in configuration
- * - or wrapper key was "Payload" / "PAYLOAD"
- * - always return the inner payload object for your logic
- */
 function normalizePayload(configObj) {
-  if (!configObj) return {};
-
-  // if configObj is already the usable payload object
-  if (configObj && typeof configObj === "object" && !Array.isArray(configObj)) {
-    // unwrap payload (case-insensitive)
-    const payloadKey =
-      Object.keys(configObj).find((k) => k.toLowerCase() === "payload") || null;
-
-    if (payloadKey && configObj[payloadKey] && typeof configObj[payloadKey] === "object") {
-      return configObj[payloadKey];
-    }
+  if (!configObj) return null;
+  if (typeof configObj === "object" && !Array.isArray(configObj)) {
+    const key = Object.keys(configObj).find((k) => k.toLowerCase() === "payload");
+    return key ? configObj[key] : configObj;
   }
-
-  return configObj;
-}
-
-function snippetAround(str, index, radius = 60) {
-  const s = String(str || "");
-  const start = Math.max(index - radius, 0);
-  const end = Math.min(index + radius, s.length);
-  return s.slice(start, end);
-}
-
-function balanceClosers(str) {
-  const s = String(str || "");
-  const stack = [];
-  for (let i = 0; i < s.length; i++) {
-    const ch = s[i];
-    if (ch === "{" || ch === "[") stack.push(ch);
-    else if (ch === "}" && stack[stack.length - 1] === "{") stack.pop();
-    else if (ch === "]" && stack[stack.length - 1] === "[") stack.pop();
-  }
-
-  let out = s;
-  while (stack.length) {
-    const opener = stack.pop();
-    out += opener === "{" ? "}" : "]";
-  }
-  return out;
-}
-
-/**
- * Parses Zoho/Deluge style string:
- * {Guardwel Cabinets=[{name=Guardwel SLD-90, width=1130, lockers=[{label=L1}]}]}
- */
-function parseZohoKvFormat(str) {
-  const s = String(str || "").trim();
-  let i = 0;
-
-  const skip = () => {
-    while (i < s.length && /\s/.test(s[i])) i++;
-  };
-  const peek = () => s[i];
-
-  const fail = (msg) => {
-    const near = snippetAround(s, i, 80);
-    throw new Error(`${msg} at index ${i}. Near: ${near}`);
-  };
-
-  const consume = (ch) => {
-    if (s[i] !== ch) fail(`Expected '${ch}' but found '${s[i]}'`);
-    i++;
-  };
-
-  const parseAtom = () => {
-    skip();
-    const start = i;
-    while (i < s.length && ![",", "}", "]"].includes(s[i])) i++;
-    const token = s.slice(start, i).trim();
-
-    if (token === "") return "";
-    if (token === "null") return null;
-    if (token === "true") return true;
-    if (token === "false") return false;
-    if (/^-?\d+(\.\d+)?$/.test(token)) return Number(token);
-    return token;
-  };
-
-  const parseValue = () => {
-    skip();
-    if (peek() === "{") return parseObject();
-    if (peek() === "[") return parseArray();
-    return parseAtom();
-  };
-
-  // stricter key parse: stop if we hit delimiters before '='
-  const parseKey = () => {
-    skip();
-    const start = i;
-    while (i < s.length && s[i] !== "=") {
-      if (s[i] === "," || s[i] === "}" || s[i] === "]") {
-        const bad = s.slice(start, i).trim();
-        fail(`Invalid key=value format (missing '=' for key '${bad}')`);
-      }
-      i++;
-    }
-    if (i >= s.length) fail("Invalid key=value format (reached end before '=')");
-    return s.slice(start, i).trim();
-  };
-
-  const parseObject = () => {
-    consume("{");
-    skip();
-    const obj = {};
-
-    while (i < s.length && peek() !== "}") {
-      const key = parseKey();
-      consume("=");
-      const value = parseValue();
-      obj[key] = value;
-
-      skip();
-      if (peek() === ",") {
-        i++;
-        skip();
-      }
-    }
-
-    if (peek() !== "}") fail("Unclosed object '}' missing");
-    consume("}");
-    return obj;
-  };
-
-  const parseArray = () => {
-    consume("[");
-    skip();
-    const arr = [];
-
-    while (i < s.length && peek() !== "]") {
-      arr.push(parseValue());
-      skip();
-      if (peek() === ",") {
-        i++;
-        skip();
-      }
-    }
-
-    if (peek() !== "]") fail("Unclosed array ']' missing");
-    consume("]");
-    return arr;
-  };
-
-  skip();
-  const out = parseValue();
-  skip();
-  return out;
-}
-
-/**
- * FINAL: parse configuration TEXT:
- * - JSON object string => JSON.parse
- * - KV string => parseZohoKvFormat (with salvage attempt)
- * - also handles "double-encoded" JSON string
- */
-function parseConfiguration(confStr) {
-  if (!confStr) return null;
-
-  // 1) JSON first
-  const json = safeJsonParse(confStr);
-  // console.log("JSON--", json);
-
-  if (json != null) {
-    // if accidentally stored as JSON string inside JSON (double encoded)
-    if (typeof json === "string") {
-      const inner = safeJsonParse(json);
-      if (inner && typeof inner === "object") return normalizePayload(inner);
-
-      // if inner is KV
-      const trimmed = json.trim();
-      if (trimmed.startsWith("{") && trimmed.includes("=")) {
-        try {
-          return normalizePayload(parseZohoKvFormat(trimmed));
-        } catch {
-          // continue to fallback below
-        }
-      }
-      return null;
-    }
-
-    if (typeof json === "object") return normalizePayload(json);
-  }
-
-  // 2) KV format
-  const s = String(confStr).trim();
-  if (s.startsWith("{") && s.includes("=")) {
-    try {
-      return normalizePayload(parseZohoKvFormat(s));
-    } catch (e) {
-      // salvage: trim to last '}' or ']' then balance remaining closers
-      const lastClose = Math.max(s.lastIndexOf("}"), s.lastIndexOf("]"));
-      if (lastClose > 0) {
-        const cut = s.slice(0, lastClose + 1);
-        const repaired = balanceClosers(cut);
-        try {
-          return normalizePayload(parseZohoKvFormat(repaired));
-        } catch (e2) {
-          const preview = s.slice(0, 250);
-          throw new Error(`${e2.message}. Preview: ${preview}`);
-        }
-      }
-      const preview = s.slice(0, 250);
-      throw new Error(`${e.message}. Preview: ${preview}`);
-    }
-  }
-
   return null;
 }
+
+function encodeGzJson(obj) {
+  const gz = zlib.gzipSync(Buffer.from(JSON.stringify(obj), "utf8"));
+  return "gz:" + gz.toString("base64");
+}
+
+function tryDecodeGzJson(str) {
+  if (typeof str !== "string") return null;
+  if (!str.startsWith("gz:")) return null;
+  const buf = Buffer.from(str.slice(3), "base64");
+  const json = zlib.gunzipSync(buf).toString("utf8");
+  return JSON.parse(json);
+}
+
+function parseConfiguration(raw) {
+  if (!raw) return null;
+  const gz = tryDecodeGzJson(raw);
+  if (gz) return gz;
+  return safeJsonParse(raw);
+}
+
+function isTruncatedJsonString(raw) {
+  const t = String(raw || "").trim();
+  if (!t) return false;
+  return (t.startsWith("{") || t.startsWith("[")) && !(t.endsWith("}") || t.endsWith("]"));
+}
+
+function toStr(v) {
+  if (v == null) return null;
+  const s = String(v).trim();
+  return s === "" ? null : s;
+}
+
+function toInt(v) {
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  return Math.trunc(n);
+}
+
+function toNum(v) {
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function getRowId(row) {
+  return String(row?.ROWID ?? "");
+}
+
+/** Catalyst ZCQL unwrap */
+function unwrapZcqlRow(obj) {
+  const key = Object.keys(obj || {})[0];
+  return key ? obj[key] : null;
+}
+
+function chunkArray(arr, size = 100) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+async function insertLockersBatch(lockerTable, rows) {
+  if (!rows.length) return [];
+  if (typeof lockerTable.insertRows === "function") {
+    const res = await lockerTable.insertRows(rows);
+    if (Array.isArray(res)) return res;
+    if (Array.isArray(res?.rows)) return res.rows;
+    return [];
+  }
+
+  const out = [];
+  for (const r of rows) out.push(await lockerTable.insertRow(r));
+  return out;
+}
+
+/* ------------------------------------------------ */
+/* OPTION A: create cabinets first, then lockers     */
+/* ------------------------------------------------ */
+
+async function createCabinetsAndLockers(req, payload, industryName) {
+  const ds = catalystApp(req).datastore();
+  const cabinetTable = ds.table("cabinets");
+  const lockerTable = ds.table("lockers");
+
+  const cabinetIds = [];
+  let totalLockersCreated = 0;
+
+  console.log("==============================================");
+  console.log("🚀 OPTION A START");
+  console.log("🏭 industryName:", industryName);
+  console.log("🧩 groups:", Object.keys(payload || {}));
+  console.log("==============================================");
+
+  for (const [groupName, models] of Object.entries(payload || {})) {
+    if (!Array.isArray(models)) continue;
+
+    console.log("----------------------------------------------");
+    console.log(`📁 GROUP: "${groupName}" | cabinets=${models.length}`);
+    console.log("----------------------------------------------");
+
+    for (let idx = 0; idx < models.length; idx++) {
+      const model = models[idx];
+
+      console.log("");
+      console.log(`🗄️  Creating Cabinet: "${model?.name}" (index=${idx})`);
+
+      if (!model?.name) {
+        console.log("⚠️ skipped: model.name missing");
+        continue;
+      }
+
+      // ✅ CABINET schema EXACT (your schema)
+      const cabinetInsertPayload = {
+        name: toStr(model.name),
+        width: toStr(model.width),
+        height: toStr(model.height),
+        depth: toStr(model.depth),
+        status: toStr(model.status) || "STANDARD",
+        org_id: null,
+        branch_id: null
+      };
+
+      console.log("   🧾 cabinet insert payload:", cabinetInsertPayload);
+
+      const cabinetRow = await cabinetTable.insertRow(cabinetInsertPayload);
+      const cabinetId = getRowId(cabinetRow);
+
+      if (!cabinetId) throw new Error("Cabinet insert returned no ROWID");
+
+      cabinetIds.push(cabinetId);
+      console.log(`✅ Cabinet created: cabinetId=${cabinetId}`);
+
+      // ✅ LOCKERS schema EXACT (your schema)
+      const lockers = Array.isArray(model.lockers) ? model.lockers : [];
+      const modelLockerDepth = toNum(model?.locker_internal_depth); // comes from cabinet level
+      console.log(`🔐 inserting lockers for cabinetId=${cabinetId} count=${lockers.length}`);
+      console.log(`   📏 model locker_internal_depth =`, modelLockerDepth);
+
+      const lockerRows = lockers.map((l, i) => {
+        // ✅ FIX: If locker doesn't carry locker_internal_depth, inherit from model
+        const resolvedDepth =
+          toNum(l?.locker_internal_depth) != null
+            ? toNum(l?.locker_internal_depth)
+            : modelLockerDepth;
+
+        if (i === 0) {
+          console.log("   🧪 sample locker depth resolve:", {
+            lockerProvided: l?.locker_internal_depth,
+            modelProvided: model?.locker_internal_depth,
+            finalUsed: resolvedDepth
+          });
+        }
+
+        return {
+          cabinet_id: cabinetId,
+          status: toStr(l?.status) || null,
+          book_id: toStr(l?.book_id) || null,
+          label: toStr(l?.label) || null,
+          width: toNum(l?.width),
+          height: toNum(l?.height),
+          rowNo: toInt(l?.RowNo ?? l?.rowNo),
+          position: toInt(l?.position),
+          price: toInt(l?.price),
+          locker_internal_depth: resolvedDepth, // ✅ FIXED
+          row_thickness: toNum(l?.row_thickness),
+          thickness: toNum(l?.thickness)
+        };
+      });
+
+      const chunks = chunkArray(lockerRows, 100);
+      let insertedCount = 0;
+
+      for (let c = 0; c < chunks.length; c++) {
+        console.log(`   📦 lockers chunk ${c + 1}/${chunks.length} size=${chunks[c].length}`);
+        const inserted = await insertLockersBatch(lockerTable, chunks[c]);
+        insertedCount += inserted.length;
+      }
+
+      totalLockersCreated += insertedCount;
+      console.log(`✅ Lockers inserted for cabinetId=${cabinetId} inserted=${insertedCount}`);
+    }
+  }
+
+  console.log("==============================================");
+  console.log("✅ OPTION A DONE");
+  console.log("🗄️ cabinetsCreated:", cabinetIds.length);
+  console.log("🔐 lockersCreated :", totalLockersCreated);
+  console.log("==============================================");
+
+  return { cabinetIds, totalLockersCreated };
+}
+
+/* ------------------------------------------------ */
+/* STEP-0: Create industry lockers structure         */
+/* ------------------------------------------------ */
+
+exports.createIndustryLocker = async (req) => {
+  const { payload, name, storeCompressed } = req.body;
+
+  console.log("\n================ createIndustryLocker ================");
+  console.log("name:", name);
+  console.log("storeCompressed:", !!storeCompressed);
+  console.log("payloadType:", typeof payload);
+  console.log("======================================================\n");
+
+  if (!name) throw new Error("name is required");
+  if (!payload) throw new Error("payload is required");
+
+  const parsed = typeof payload === "object" ? payload : parseConfiguration(payload);
+  const normalized = normalizePayload(parsed);
+
+  if (!normalized || typeof normalized !== "object" || Array.isArray(normalized)) {
+    throw new Error(
+      "Payload must be object like { groupName: [cabinets...] } or { payload: {...} }"
+    );
+  }
+
+  console.log("✅ Parsed payload groups:", Object.keys(normalized));
+
+  // 1) Create cabinets + lockers first
+  const { cabinetIds, totalLockersCreated } =
+    await createCabinetsAndLockers(req, normalized, name);
+
+  // 2) Save cabinetIds in industry_lockers configuration
+  const configObj = {
+    industryName: name,
+    cabinetIds,
+    createdAt: new Date().toISOString()
+  };
+
+  const configuration = storeCompressed ? encodeGzJson(configObj) : JSON.stringify(configObj);
+
+  console.log("🧾 saving industry_lockers row");
+  console.log("   configObj:", configObj);
+  console.log("   configLen:", configuration.length);
+
+  const row = await catalystApp(req)
+    .datastore()
+    .table("industry_lockers")
+    .insertRow({ name, configuration });
+
+  return {
+    status: "Created",
+    rowId: row.ROWID,
+    cabinetsCreated: cabinetIds.length,
+    lockersCreated: totalLockersCreated,
+    cabinetIds
+  };
+};
+
+/* ------------------------------------------------ */
+/* STEP-1: List all Industry Lockers (dropdown)      */
+/* ------------------------------------------------ */
+
+exports.getIndustryLockers = async (req) => {
+  const ds = catalystApp(req).datastore();
+  const zcql = catalystApp(req).zcql();
+
+  console.log("🔥 getIndustryLockers (dropdown)");
+  const rows = await zcql.executeZCQLQuery(
+    `SELECT ROWID, name FROM industry_lockers ORDER BY ROWID DESC`
+  );
+
+  const result = (rows || []).map((r) => {
+    const row = unwrapZcqlRow(r) || {};
+    return { rowId: String(row.ROWID), name: row.name };
+  });
+
+  console.log("✅ industry lockers count:", result.length);
+  return result;
+};
+
+/* ------------------------------------------------ */
+/* STEP-2: Cabinets for selected Industry Locker     */
+/* ------------------------------------------------ */
+
+exports.getIndustryLockerCabinets = async (req) => {
+  const rowId = ensureRowId(req.params.rowId);
+  const ds = catalystApp(req).datastore();
+  const zcql  = catalystApp(req).zcql();
+
+  console.log("🔥 getIndustryLockerCabinets rowId=", rowId);
+
+  const record = await ds.table("industry_lockers").getRow(rowId);
+  const raw = String(record?.configuration || "");
+
+  console.log("   configLen=", raw.length);
+  if (isTruncatedJsonString(raw)) throw new Error("Configuration truncated. Use CLOB/Large Text.");
+
+  const config = parseConfiguration(raw);
+  const cabinetIds = Array.isArray(config?.cabinetIds) ? config.cabinetIds : [];
+
+  console.log("   cabinetIds=", cabinetIds.length);
+  if (!cabinetIds.length) return { rowId, industryName: record?.name, cabinets: [] };
+
+  const cabinets = [];
+  const chunks = chunkArray(cabinetIds, 100);
+
+  for (let i = 0; i < chunks.length; i++) {
+    const ids = chunks[i].map((x) => Number(String(x))).filter((n) => Number.isFinite(n));
+    if (!ids.length) continue;
+
+    const q = `SELECT ROWID, name, width, height, depth FROM cabinets WHERE ROWID IN (${ids.join(",")})`;
+    console.log(`   🧾 ZCQL cabinets chunk ${i + 1}/${chunks.length}:`, q);
+
+    const rows = await zcql.executeZCQLQuery(q);
+    rows.forEach((r) => {
+      const cab = unwrapZcqlRow(r) || {};
+      cabinets.push({
+        cabinetId: String(cab.ROWID),
+        cabinetName: cab.name,
+        width: cab.width,
+        height: cab.height,
+        depth: cab.depth
+      });
+    });
+  }
+
+  // add totalLockers
+  for (const c of cabinets) {
+    const q = `SELECT COUNT(ROWID) as cnt FROM lockers WHERE cabinet_id = ${Number(c.cabinetId)}`;
+    const res = await zcql.executeZCQLQuery(q);
+    const row = unwrapZcqlRow(res?.[0]) || {};
+    c.totalLockers = Number(row.cnt || 0);
+  }
+
+  return {
+    rowId,
+    industryName: record?.name,
+    cabinets
+  };
+};
+
+/* ------------------------------------------------ */
+/* STEP-3: Cabinet Details + Lockers by cabinetId    */
+/* ------------------------------------------------ */
+
+exports.getIndustryLockerCabinetDetails = async (req) => {
+  const rowId = ensureRowId(req.params.rowId);
+  const cabinetId = ensureRowId(req.params.cabinetId); // ✅ cabinetId from route
+
+  const ds = catalystApp(req).datastore();
+  const zcql  = catalystApp(req).zcql();
+
+  console.log("🔥 getIndustryLockerCabinetDetails rowId=", rowId, "cabinetId=", cabinetId);
+
+  // 1) read industry_lockers config
+  const record = await ds.table("industry_lockers").getRow(rowId);
+  const raw = String(record?.configuration || "");
+
+  console.log("   configLen=", raw.length);
+  if (isTruncatedJsonString(raw)) throw new Error("Configuration truncated. Use CLOB/Large Text.");
+
+  const config = parseConfiguration(raw);
+  const cabinetIds = Array.isArray(config?.cabinetIds) ? config.cabinetIds.map(String) : [];
+
+  console.log("   linked cabinetIds count=", cabinetIds.length);
+
+  // 2) validate cabinetId belongs to this industry locker
+  if (!cabinetIds.includes(String(cabinetId))) {
+    throw new Error(`This cabinetId=${cabinetId} is not linked to industry rowId=${rowId}`);
+  }
+
+  // 3) fetch cabinet
+  const qCab = `SELECT ROWID, name, width, height, depth FROM cabinets WHERE ROWID = ${Number(
+    cabinetId
+  )}`;
+  console.log("   🧾 ZCQL cabinet:", qCab);
+
+  const cabRows = await zcql.executeZCQLQuery(qCab);
+  const cab = unwrapZcqlRow(cabRows?.[0]) || null;
+  if (!cab) throw new Error(`Cabinet not found for cabinetId=${cabinetId}`);
+
+  // 4) fetch lockers for this cabinet
+  const qLockers = `SELECT * FROM lockers WHERE cabinet_id = ${Number(
+    cabinetId
+  )} ORDER BY rowNo, position`;
+  console.log("   🧾 ZCQL lockers:", qLockers);
+
+  const lockerRows = await zcql.executeZCQLQuery(qLockers);
+
+  const lockers = (lockerRows || []).map((r) => {
+    const l = unwrapZcqlRow(r) || {};
+    return {
+      lockerId: String(l.ROWID),
+      cabinet_id: String(l.cabinet_id),
+      label: l.label,
+      width: l.width,
+      height: l.height,
+      rowNo: l.rowNo,
+      position: l.position,
+      price: l.price,
+      locker_internal_depth: l.locker_internal_depth,
+      row_thickness: l.row_thickness,
+      thickness: l.thickness,
+      status: l.status,
+      book_id: l.book_id
+    };
+  });
+
+  console.log("✅ cabinet fetched:", cab?.name);
+  console.log("✅ lockers fetched:", lockers.length);
+
+  return {
+    rowId,
+    industryName: record?.name,
+    cabinet: {
+      cabinetId: String(cab.ROWID),
+      name: cab.name,
+      width: cab.width,
+      height: cab.height,
+      depth: cab.depth
+    },
+    lockers
+  };
+};
+
+/* ------------------------------------------------ */
+/* Normal lockers methods (keep your existing ones)  */
+/* ------------------------------------------------ */
+// NOTE: keep your existing createLocker/getLockersByCabinet/getLockerById/updateLocker/deleteLocker/bookLocker below
+// exports.createLocker = async (req) => { ... }
 
 // -------------------- Normal Lockers --------------------
 exports.createLocker = async (req) => {
@@ -298,158 +501,4 @@ exports.bookLocker = async (req) => {
     .updateRow({ ROWID: lockerId, status: "booked", booking_id });
 
   return { lockerId, status: "booked" };
-};
-
-// -------------------- Industry Lockers --------------------
-
-// ✅ Create: ALWAYS store as proper JSON string going forward
-// Also: if frontend accidentally sends wrapper {name, payload} inside payload, normalize it.
-exports.createIndustryLocker = async (req) => {
-  const { payload, name } = req.body;
-  if (!name) throw new Error("name is required");
-  if (!payload) throw new Error("payload is required");
-
-  let obj;
-
-  if (typeof payload === "object") {
-    obj = normalizePayload(payload);
-  } else {
-    // string input: could be JSON or KV
-    const parsed = parseConfiguration(payload);
-    if (!parsed || typeof parsed !== "object") {
-      throw new Error(`Payload is not valid JSON/KV. Preview: ${String(payload).slice(0, 200)}`);
-    }
-    obj = normalizePayload(parsed);
-  }
-
-  if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
-    throw new Error("Final payload must be an object (groupName => models[])");
-  }
-
-  const configuration = JSON.stringify(obj);
-
-  const row = await catalystApp(req)
-    .datastore()
-    .table("industry_lockers")
-    .insertRow({ name, configuration });
-
-  return { status: "Created", rowId: row.ROWID };
-};
-
-// ✅ Step-1: list structures
-exports.getIndustryLockers = async (req) => {
-  const page = Math.max(parseInt(req.query.page || "1", 10), 1);
-  const limit = Math.min(Math.max(parseInt(req.query.limit || "100", 10), 1), 300);
-  const offset = (page - 1) * limit;
-
-  const zcql = catalystApp(req).zcql();
-  const query = `SELECT ROWID, name FROM industry_lockers LIMIT ${offset}, ${limit}`;
-  const rows = await zcql.executeZCQLQuery(query);
-
-  const items = (rows || [])
-    .map(unwrapZcqlRow)
-    .filter(Boolean)
-    .map((r) => ({ rowId: r.ROWID, name: r.name }));
-
-  return { page, limit, items };
-};
-
-// ✅ Step-2: cabinets dropdown (flat + groups)
-exports.getIndustryLockerCabinets = async (req) => {
-  const rowId = ensureRowId(req.params.rowId);
-
-  const zcql = catalystApp(req).zcql();
-  const query = `SELECT ROWID, name, configuration FROM industry_lockers WHERE ROWID = ${rowId}`;
-  const rows = await zcql.executeZCQLQuery(query);
-
-  const record = unwrapZcqlRow(rows?.[0]);
-  // console.log("RECORD-",record);
-  if (!record) throw new Error("Industry locker not found");
-
-  const payload = parseConfiguration(record.configuration);
-
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    throw new Error(`Invalid configuration stored. Preview: ${String(record.configuration).slice(0, 200)}`);
-  }
-
-  const cabinets = [];
-  const groups = Object.entries(payload).map(([groupName, models]) => {
-    const arr = Array.isArray(models) ? models : [];
-
-    arr.forEach((m) => {
-      cabinets.push({
-        cabinetName: m?.name,
-        groupName,
-        width: m?.width,
-        height: m?.height,
-        depth: m?.depth,
-        locker_internal_depth: m?.locker_internal_depth,
-        totalLockers: Array.isArray(m?.lockers) ? m.lockers.length : 0,
-      });
-    });
-
-    return {
-      groupName,
-      models: arr.map((m) => ({
-        name: m?.name,
-        width: m?.width,
-        height: m?.height,
-        depth: m?.depth,
-        locker_internal_depth: m?.locker_internal_depth,
-        totalLockers: Array.isArray(m?.lockers) ? m.lockers.length : 0,
-      })),
-    };
-  });
-
-  return {
-    rowId: record.ROWID,
-    industryName: record.name,
-    cabinets,
-  };
-};
-
-// ✅ Step-3: cabinet details by name (no need groupName from UI)
-exports.getIndustryLockerCabinetDetails = async (req) => {
-  const rowId = ensureRowId(req.params.rowId);
-  const modelName = decodeParam(req.params.modelName);
-
-  const zcql = catalystApp(req).zcql();
-  const query = `SELECT ROWID, name, configuration FROM industry_lockers WHERE ROWID = ${rowId}`;
-  const rows = await zcql.executeZCQLQuery(query);
-
-  const record = unwrapZcqlRow(rows?.[0]);
-  if (!record) throw new Error("Industry locker not found");
-
-  const payload = parseConfiguration(record.configuration);
-
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    throw new Error(`Invalid configuration stored. Preview: ${String(record.configuration).slice(0, 200)}`);
-  }
-
-  const equals = (a, b) =>
-    String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
-
-  let foundGroup = null;
-  let foundModel = null;
-
-  for (const [gName, models] of Object.entries(payload)) {
-    const arr = Array.isArray(models) ? models : [];
-    const match = arr.find((m) => equals(m?.name, modelName));
-    if (match) {
-      foundGroup = gName;
-      foundModel = match;
-      break;
-    }
-  }
-
-  if (!foundModel) throw new Error(`Cabinet not found: ${modelName}`);
-
-  return {
-    rowId: record.ROWID,
-    industryName: record.name,
-    cabinetName: foundModel.name,
-    groupName: foundGroup,
-    cabinet: foundModel,
-    lockers: Array.isArray(foundModel.lockers) ? foundModel.lockers : [],
-  };
 };

@@ -11,76 +11,109 @@ exports.createBranch = async (req) => {
 };
 
 exports.getBranchesWithCounts = async (req) => {
-    const zcql = catalystApp(req).zcql();
-  
-    const { org_id } = req.query;
-    if (!org_id) {
-      throw new Error("org_id is required");
-    }
-  
-    const query = `
-      SELECT
-        branches.ROWID,
-        branches.name,
-        cabinets.ROWID,
-        lockers.ROWID,
-        lockers.status
-      FROM branches
-      LEFT JOIN cabinets
-        ON cabinets.branch_id = branches.ROWID
-      LEFT JOIN lockers
-        ON lockers.cabinet_id = cabinets.ROWID
-      WHERE branches.org_id = ${org_id}
-    `;
-  
-    const rows = await zcql.executeZCQLQuery(query);
-  
-    const branchMap = {};
-  
-    for (const row of rows) {
-      const branch = row.branches;
-      const cabinet = row.cabinets;
-      const locker = row.lockers;
-  
-      if (!branch || !branch.ROWID) continue;
-  
-      // ✅ Ensure EVERY branch is created once
-      if (!branchMap[branch.ROWID]) {
-        branchMap[branch.ROWID] = {
-          id: branch.ROWID,
-          name: branch.name,
-          cabinets: new Set(),
-          lockers: 0,
-          available: 0,
-          booked: 0
-        };
-      }
-  
-      if (cabinet && cabinet.ROWID) {
-        branchMap[branch.ROWID].cabinets.add(cabinet.ROWID);
-      }
-  
-      if (locker && locker.ROWID) {
-        branchMap[branch.ROWID].lockers++;
-  
-        if (locker.status === "available") {
-          branchMap[branch.ROWID].available++;
-        } else if (locker.status === "booked") {
-          branchMap[branch.ROWID].booked++;
-        }
-      }
-    }
-  
-    return Object.values(branchMap).map(b => ({
-      id: b.id,
-      name: b.name,
-      cabinets: b.cabinets.size,
-      lockers: b.lockers,
-      available: b.available,
-      booked: b.booked
-    }));
+  const zcql = catalystApp(req).zcql();
+
+  const orgId = Number(req.query.org_id);
+  if (!Number.isFinite(orgId)) {
+    throw new Error("Valid org_id is required");
+  }
+
+  // helpers
+  const chunk = (arr, size) => {
+    const out = [];
+    for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+    return out;
   };
-  
+
+  const esc = (val) => String(val).replace(/'/g, "''");
+
+  // 1) Fetch branches
+  const branchRows = await zcql.executeZCQLQuery(`
+    SELECT ROWID, name
+    FROM branches
+    WHERE org_id = ${orgId}
+  `);
+
+  const branches = branchRows.map((r) => r.branches).filter(Boolean);
+
+  // build branchMap like your original logic
+  const branchMap = new Map();
+  for (const b of branches) {
+    if (!b?.ROWID) continue;
+    branchMap.set(b.ROWID, {
+      id: b.ROWID,
+      name: b.name,
+      cabinets: new Set(),
+      lockers: 0,
+      available: 0,
+      booked: 0,
+    });
+  }
+
+  if (branchMap.size === 0) return [];
+
+  const branchIds = Array.from(branchMap.keys()).map((id) => `'${esc(id)}'`);
+
+  // 2) Fetch cabinets for those branches (branch_id is VARCHAR)
+  const cabinetToBranch = new Map(); // cabinetRowId -> branchRowId
+  const cabinetIds = [];
+
+  for (const ids of chunk(branchIds, 200)) {
+    const cabRows = await zcql.executeZCQLQuery(`
+      SELECT ROWID, branch_id
+      FROM cabinets
+      WHERE branch_id IN (${ids.join(",")})
+    `);
+
+    for (const row of cabRows) {
+      const c = row.cabinets;
+      if (!c?.ROWID) continue;
+
+      cabinetIds.push(`'${esc(c.ROWID)}'`);
+      cabinetToBranch.set(c.ROWID, c.branch_id);
+
+      const bm = branchMap.get(c.branch_id);
+      if (bm) bm.cabinets.add(c.ROWID);
+    }
+  }
+
+  // 3) Fetch lockers for those cabinets and aggregate counts per branch
+  if (cabinetIds.length) {
+    for (const ids of chunk(cabinetIds, 200)) {
+      const lockRows = await zcql.executeZCQLQuery(`
+        SELECT ROWID, cabinet_id, status
+        FROM lockers
+        WHERE cabinet_id IN (${ids.join(",")})
+      `);
+
+      for (const row of lockRows) {
+        const l = row.lockers;
+        if (!l?.ROWID) continue;
+
+        const branchId = cabinetToBranch.get(l.cabinet_id);
+        if (!branchId) continue;
+
+        const bm = branchMap.get(branchId);
+        if (!bm) continue;
+
+        bm.lockers++;
+        if (l.status === "available") bm.available++;
+        else if (l.status === "booked") bm.booked++;
+      }
+    }
+  }
+
+  // final output (same shape as your return)
+  return Array.from(branchMap.values()).map((b) => ({
+    id: b.id,
+    name: b.name,
+    cabinets: b.cabinets.size,
+    lockers: b.lockers,
+    available: b.available,
+    booked: b.booked,
+  }));
+};
+
 exports.getBranchById = async (req) =>
   catalystApp(req).datastore().table("branches").getRow(req.params.id);
 
@@ -117,3 +150,4 @@ exports.deleteBranch = async (req) =>
     .datastore()
     .table("branches")
     .updateRow({ ROWID: req.params.id, status: "INACTIVE" });
+  
