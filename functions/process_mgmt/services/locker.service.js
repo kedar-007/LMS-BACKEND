@@ -442,16 +442,17 @@ exports.getIndustryLockerCabinetDetails = async (req) => {
   const ds = catalystApp(req).datastore();
   const zcql = catalystApp(req).zcql();
 
-  // console.log(
-  //   "🔥 getIndustryLockerCabinetDetails rowId=",
-  //   rowId,
-  //   "cabinetId=",
-  //   cabinetId
-  // );
+  console.log(
+    "🔥 getIndustryLockerCabinetDetails rowId=",
+    rowId,
+    "cabinetId=",
+    cabinetId
+  );
 
   // 1) read industry_lockers config
   const record = await ds.table("industry_lockers").getRow(rowId);
   const raw = String(record?.configuration || "");
+  console.log("RAW PAYLOAD--",raw);
 
   console.log("   configLen=", raw.length);
   if (isTruncatedJsonString(raw))
@@ -472,9 +473,9 @@ exports.getIndustryLockerCabinetDetails = async (req) => {
   }
 
   // 3) fetch cabinet
-  const qCab = `SELECT ROWID, name, width, height, depth FROM cabinets WHERE ROWID = ${Number(
+  const qCab = `SELECT ROWID, name, width, height, depth FROM cabinets WHERE ROWID = ${
     cabinetId
-  )}`;
+  }`;
   console.log("   🧾 ZCQL cabinet:", qCab);
 
   const cabRows = await zcql.executeZCQLQuery(qCab);
@@ -482,9 +483,9 @@ exports.getIndustryLockerCabinetDetails = async (req) => {
   if (!cab) throw new Error(`Cabinet not found for cabinetId=${cabinetId}`);
 
   // 4) fetch lockers for this cabinet
-  const qLockers = `SELECT * FROM lockers WHERE cabinet_id = ${Number(
+  const qLockers = `SELECT * FROM lockers WHERE cabinet_id = ${
     cabinetId
-  )} ORDER BY rowNo, position`;
+  } ORDER BY rowNo, position`;
   console.log("   🧾 ZCQL lockers:", qLockers);
 
   const lockerRows = await zcql.executeZCQLQuery(qLockers);
