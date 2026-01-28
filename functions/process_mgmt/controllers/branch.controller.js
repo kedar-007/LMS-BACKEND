@@ -12,7 +12,7 @@ exports.createBranch = async (req, res) => {
 
 exports.getBranches = async (req, res) => {
   try {
-    const branches = await service.getBranchesWithCounts(req);
+    const branches = await service.getBranches(req);
     return successResponse(res, "Branches fetched successfully", branches);
   } catch (e) {
     return errorResponse(res, e.message, 500);
