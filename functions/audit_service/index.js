@@ -12,7 +12,8 @@ function sendJson(res, status, payload) {
 }
 
 // adapters to mimic express-style req/res used by your controllers
-function attachExpressLike(req, res) {
+function 
+attachExpressLike(req, res) {
   const parsed = url.parse(req.url, true);
 
   req.query = parsed.query || {};

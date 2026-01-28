@@ -62,8 +62,8 @@ exports.getBranchesWithCounts = async (req) => {
     SELECT ROWID, name, address, branch_code, status
     FROM branches
     WHERE org_id = ${orgId}
+      AND status = 'ACTIVE'
   `);
-
   const branches = branchRows.map(r => r.branches).filter(Boolean);
   console.log("🏢 Branches fetched =", branches.length);
 
@@ -76,6 +76,7 @@ exports.getBranchesWithCounts = async (req) => {
       id: b.ROWID,
       name: b.name,
       address: b.address,
+      status:b.status,
       branch_code: b.branch_code,
       cabinets: new Set(),
       lockers: 0,
@@ -186,6 +187,7 @@ exports.getBranchesWithCounts = async (req) => {
     id: b.id,
     name: b.name,
     address: b.address,
+    status:b.status,
     branch_code: b.branch_code,
     cabinets: b.cabinets.size,
     lockers: b.lockers,
