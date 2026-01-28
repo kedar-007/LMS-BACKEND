@@ -36,7 +36,7 @@ exports.createBranch = async (req) => {
 // -------------------------
 // READ APIs (No audit)
 // -------------------------
-exports.getBranches = async (req) => {
+exports.getBranchesWithCounts = async (req) => {
   const zcql = catalystApp(req).zcql();
 
   const orgId = Number(req.query.org_id);
@@ -44,23 +44,156 @@ exports.getBranches = async (req) => {
     throw new Error("Valid org_id is required");
   }
 
+  // helpers
+  const chunk = (arr, size) => {
+    const out = [];
+    for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+    return out;
+  };
+
+  const esc = (val) => String(val).replace(/'/g, "''");
+
+  console.log("🔍 orgId =", orgId);
+
+  /* =========================
+     1️⃣ Fetch branches
+  ========================== */
   const branchRows = await zcql.executeZCQLQuery(`
     SELECT ROWID, name, address, branch_code, status
     FROM branches
     WHERE org_id = ${orgId}
   `);
 
-  return branchRows
-    .map(row => row.branches)
-    .filter(Boolean)
-    .map(b => ({
+  const branches = branchRows.map(r => r.branches).filter(Boolean);
+  console.log("🏢 Branches fetched =", branches.length);
+
+  const branchMap = new Map();
+
+  for (const b of branches) {
+    if (!b?.ROWID) continue;
+
+    branchMap.set(b.ROWID, {
       id: b.ROWID,
       name: b.name,
       address: b.address,
       branch_code: b.branch_code,
-      status: b.status
-    }));
+      cabinets: new Set(),
+      lockers: 0,
+      available: 0,
+      booked: 0,
+    });
+  }
+
+  if (branchMap.size === 0) {
+    console.log("⚠️ No branches found");
+    return [];
+  }
+
+  const branchIds = Array.from(branchMap.keys()).map(id => `'${esc(id)}'`);
+  console.log("📌 Branch IDs =", branchIds.length);
+
+  /* =========================
+     2️⃣ Fetch cabinets
+  ========================== */
+  const cabinetToBranch = new Map();
+  const cabinetIds = [];
+
+  let totalCabinets = 0;
+
+  for (const ids of chunk(branchIds, 200)) {
+    const cabRows = await zcql.executeZCQLQuery(`
+      SELECT ROWID, branch_id
+      FROM cabinets
+      WHERE branch_id IN (${ids.join(",")})
+    `);
+
+    console.log("🗄️ Cabinet rows fetched (chunk) =", cabRows.length);
+
+    for (const row of cabRows) {
+      const c = row.cabinets;
+      if (!c?.ROWID) continue;
+
+      totalCabinets++;
+      cabinetIds.push(`'${esc(c.ROWID)}'`);
+      cabinetToBranch.set(c.ROWID, c.branch_id);
+
+      const bm = branchMap.get(c.branch_id);
+      if (bm) bm.cabinets.add(c.ROWID);
+    }
+  }
+
+  console.log("🗄️ Total cabinets fetched =", totalCabinets);
+
+  /* =========================
+     3️⃣ Fetch lockers
+  ========================== */
+  let totalLockers = 0;
+  let totalAvailable = 0;
+  let totalBooked = 0;
+
+  if (cabinetIds.length) {
+    for (const ids of chunk(cabinetIds, 200)) {
+      const lockRows = await zcql.executeZCQLQuery(`
+        SELECT ROWID, cabinet_id, status
+        FROM lockers
+        WHERE cabinet_id IN (${ids.join(",")})
+      `);
+
+      console.log("🔐 Locker rows fetched (chunk) =", lockRows.length);
+
+      for (const row of lockRows) {
+        const l = row.lockers;
+        if (!l?.ROWID) continue;
+
+        totalLockers++;
+
+        const branchId = cabinetToBranch.get(l.cabinet_id);
+        if (!branchId) continue;
+
+        const bm = branchMap.get(branchId);
+        if (!bm) continue;
+
+        bm.lockers++;
+
+        if (l.status === "available") {
+          bm.available++;
+          totalAvailable++;
+        } else if (l.status === "booked") {
+          bm.booked++;
+          totalBooked++;
+        }
+      }
+    }
+  }
+
+  console.log("🔐 Total lockers =", totalLockers);
+  console.log("✅ Total available =", totalAvailable);
+  console.log("⛔ Total booked =", totalBooked);
+
+  /* =========================
+     4️⃣ Per-branch debug
+  ========================== */
+  for (const b of branchMap.values()) {
+    console.log(
+      `📊 Branch ${b.name} (${b.id}) → cabinets=${b.cabinets.size}, lockers=${b.lockers}, available=${b.available}, booked=${b.booked}`
+    );
+  }
+
+  /* =========================
+     5️⃣ Final response
+  ========================== */
+  return Array.from(branchMap.values()).map(b => ({
+    id: b.id,
+    name: b.name,
+    address: b.address,
+    branch_code: b.branch_code,
+    cabinets: b.cabinets.size,
+    lockers: b.lockers,
+    available: b.available,
+    booked: b.booked,
+  }));
 };
+
 
 
 exports.getBranchById = async (req) =>
