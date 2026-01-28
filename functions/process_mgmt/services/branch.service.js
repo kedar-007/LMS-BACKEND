@@ -15,20 +15,16 @@ exports.createBranch = async (req) => {
     .table("branches")
     .insertRow({ org_id, name, address, status: "ACTIVE", branch_code });
 
-  
-  console.log("CREATED - ",created);
+  console.log("CREATED - ", created);
   // ✅ AUDIT: CREATE
-  await writeAuditLog(
-    req,
-    {
-      org_id,
-      action: "CREATE",
-      entity: "branch",
-      entity_id: created?.ROWID || created?.rowid || created?.id || "",
-      after: created,
-      extra: { payload: { name, address, branch_code } },
-    }
-  );
+  await writeAuditLog(req, {
+    org_id,
+    action: "CREATE",
+    entity: "branch",
+    entity_id: created?.ROWID || created?.rowid || created?.id || "",
+    after: created,
+    extra: { payload: { name, address, branch_code } },
+  });
 
   return created;
 };
@@ -44,19 +40,12 @@ exports.getBranchesWithCounts = async (req) => {
     throw new Error("Valid org_id is required");
   }
 
-  // helpers
-  const chunk = (arr, size) => {
-    const out = [];
-    for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-    return out;
-  };
-
   const esc = (val) => String(val).replace(/'/g, "''");
 
   console.log("🔍 orgId =", orgId);
 
   /* =========================
-     1️⃣ Fetch branches
+     1️⃣ Fetch ACTIVE branches
   ========================== */
   const branchRows = await zcql.executeZCQLQuery(`
     SELECT ROWID, name, address, branch_code, status
@@ -64,8 +53,11 @@ exports.getBranchesWithCounts = async (req) => {
     WHERE org_id = ${orgId}
       AND status = 'ACTIVE'
   `);
-  const branches = branchRows.map(r => r.branches).filter(Boolean);
-  console.log("🏢 Branches fetched =", branches.length);
+
+  const branches = branchRows.map((r) => r.branches).filter(Boolean);
+  console.log("🏢 Active branches fetched =", branches.length);
+
+  if (!branches.length) return [];
 
   const branchMap = new Map();
 
@@ -76,7 +68,7 @@ exports.getBranchesWithCounts = async (req) => {
       id: b.ROWID,
       name: b.name,
       address: b.address,
-      status:b.status,
+      status: b.status,
       branch_code: b.branch_code,
       cabinets: new Set(),
       lockers: 0,
@@ -85,91 +77,61 @@ exports.getBranchesWithCounts = async (req) => {
     });
   }
 
-  if (branchMap.size === 0) {
-    console.log("⚠️ No branches found");
-    return [];
-  }
-
-  const branchIds = Array.from(branchMap.keys()).map(id => `'${esc(id)}'`);
-  console.log("📌 Branch IDs =", branchIds.length);
-
   /* =========================
      2️⃣ Fetch cabinets
+     (branch-by-branch, NO IN)
   ========================== */
-  const cabinetToBranch = new Map();
-  const cabinetIds = [];
-
   let totalCabinets = 0;
 
-  for (const ids of chunk(branchIds, 200)) {
+  console.log("🗄️ Fetching cabinets branch-by-branch...");
+
+  for (const [branchId, bm] of branchMap.entries()) {
     const cabRows = await zcql.executeZCQLQuery(`
-      SELECT ROWID, branch_id
+      SELECT ROWID
       FROM cabinets
-      WHERE branch_id IN (${ids.join(",")})
+      WHERE branch_id = '${esc(branchId)}'
     `);
 
-    console.log("🗄️ Cabinet rows fetched (chunk) =", cabRows.length);
+    console.log(
+      `🗄️ Branch ${bm.name} (${branchId}) → cabinets fetched =`,
+      cabRows.length
+    );
 
     for (const row of cabRows) {
       const c = row.cabinets;
       if (!c?.ROWID) continue;
 
       totalCabinets++;
-      cabinetIds.push(`'${esc(c.ROWID)}'`);
-      cabinetToBranch.set(c.ROWID, c.branch_id);
+      bm.cabinets.add(c.ROWID);
 
-      const bm = branchMap.get(c.branch_id);
-      if (bm) bm.cabinets.add(c.ROWID);
-    }
-  }
-
-  console.log("🗄️ Total cabinets fetched =", totalCabinets);
-
-  /* =========================
-     3️⃣ Fetch lockers
-  ========================== */
-  let totalLockers = 0;
-  let totalAvailable = 0;
-  let totalBooked = 0;
-
-  if (cabinetIds.length) {
-    for (const ids of chunk(cabinetIds, 200)) {
+      /* =========================
+         3️⃣ Fetch lockers
+         (cabinet-by-cabinet)
+      ========================== */
       const lockRows = await zcql.executeZCQLQuery(`
-        SELECT ROWID, cabinet_id, status
+        SELECT ROWID, status
         FROM lockers
-        WHERE cabinet_id IN (${ids.join(",")})
+        WHERE cabinet_id = '${esc(c.ROWID)}'
       `);
 
-      console.log("🔐 Locker rows fetched (chunk) =", lockRows.length);
+      console.log(`🔐 Cabinet ${c.ROWID} → lockers fetched =`, lockRows.length);
 
-      for (const row of lockRows) {
-        const l = row.lockers;
+      for (const lockRow of lockRows) {
+        const l = lockRow.lockers;
         if (!l?.ROWID) continue;
-
-        totalLockers++;
-
-        const branchId = cabinetToBranch.get(l.cabinet_id);
-        if (!branchId) continue;
-
-        const bm = branchMap.get(branchId);
-        if (!bm) continue;
 
         bm.lockers++;
 
         if (l.status === "available") {
           bm.available++;
-          totalAvailable++;
         } else if (l.status === "booked") {
           bm.booked++;
-          totalBooked++;
         }
       }
     }
   }
 
-  console.log("🔐 Total lockers =", totalLockers);
-  console.log("✅ Total available =", totalAvailable);
-  console.log("⛔ Total booked =", totalBooked);
+  console.log("🗄️ Total cabinets =", totalCabinets);
 
   /* =========================
      4️⃣ Per-branch debug
@@ -183,11 +145,11 @@ exports.getBranchesWithCounts = async (req) => {
   /* =========================
      5️⃣ Final response
   ========================== */
-  return Array.from(branchMap.values()).map(b => ({
+  return Array.from(branchMap.values()).map((b) => ({
     id: b.id,
     name: b.name,
     address: b.address,
-    status:b.status,
+    status: b.status,
     branch_code: b.branch_code,
     cabinets: b.cabinets.size,
     lockers: b.lockers,
@@ -195,8 +157,6 @@ exports.getBranchesWithCounts = async (req) => {
     booked: b.booked,
   }));
 };
-
-
 
 exports.getBranchById = async (req) =>
   catalystApp(req).datastore().table("branches").getRow(req.params.id);
@@ -247,18 +207,15 @@ exports.updateBranch = async (req) => {
   const after = await table.getRow(branchId);
 
   // ✅ AUDIT: UPDATE (before + after)
-  await writeAuditLog(
-    req,
-    {
-      org_id,
-      action: "UPDATE",
-      entity: "branch",
-      entity_id: branchId,
-      before,
-      after,
-      extra: { payload: safeBody },
-    }
-  );
+  await writeAuditLog(req, {
+    org_id,
+    action: "UPDATE",
+    entity: "branch",
+    entity_id: branchId,
+    before,
+    after,
+    extra: { payload: safeBody },
+  });
 
   return after;
 };
@@ -283,18 +240,15 @@ exports.deleteBranch = async (req) => {
   const after = await table.getRow(branchId);
 
   // ✅ AUDIT: DELETE
-  await writeAuditLog(
-    req,
-    {
-      org_id,
-      action: "DELETE",
-      entity: "branch",
-      entity_id: branchId,
-      before,
-      after,
-      extra: { reason: "status_inactive" },
-    }
-  );
+  await writeAuditLog(req, {
+    org_id,
+    action: "DELETE",
+    entity: "branch",
+    entity_id: branchId,
+    before,
+    after,
+    extra: { reason: "status_inactive" },
+  });
 
   return after;
 };
