@@ -1,5 +1,6 @@
 // services/locker.service.js
 const catalystApp = require("../utils/catalyst");
+const { writeAuditLog } = require("../utils/auditLogger"); // ✅ AUDIT
 const zlib = require("zlib");
 
 /* -------------------- helpers -------------------- */
@@ -108,6 +109,23 @@ async function insertLockersBatch(lockerTable, rows) {
   return out;
 }
 
+// ✅ ZCQL safe string
+function escapeZcqlString(val) {
+  return String(val ?? "").replace(/'/g, "''");
+}
+
+// ✅ Resolve org_id from cabinet (server-truth)
+async function resolveOrgIdFromCabinet(req, cabinetId) {
+  const cab = await catalystApp(req)
+    .datastore()
+    .table("cabinets")
+    .getRow(String(cabinetId));
+  if (!cab) throw new Error("Cabinet not found (cannot resolve org_id)");
+  if (cab.org_id == null || cab.org_id === "")
+    throw new Error("Cabinet has no org_id (cannot audit)");
+  return cab.org_id;
+}
+
 /* ------------------------------------------------ */
 /* OPTION A: create cabinets first, then lockers     */
 /* ------------------------------------------------ */
@@ -174,7 +192,6 @@ async function createCabinetsAndLockers(req, payload, industryName) {
       console.log(`   📏 model locker_internal_depth =`, modelLockerDepth);
 
       const lockerRows = lockers.map((l, i) => {
-        // ✅ FIX: If locker doesn't carry locker_internal_depth, inherit from model
         const resolvedDepth =
           toNum(l?.locker_internal_depth) != null
             ? toNum(l?.locker_internal_depth)
@@ -198,7 +215,7 @@ async function createCabinetsAndLockers(req, payload, industryName) {
           rowNo: toInt(l?.RowNo ?? l?.rowNo),
           position: toInt(l?.position),
           price: toInt(l?.price),
-          locker_internal_depth: resolvedDepth, // ✅ FIXED
+          locker_internal_depth: resolvedDepth,
           row_thickness: toNum(l?.row_thickness),
           thickness: toNum(l?.thickness),
         };
@@ -235,10 +252,11 @@ async function createCabinetsAndLockers(req, payload, industryName) {
 
 /* ------------------------------------------------ */
 /* STEP-0: Create industry lockers structure         */
+/* (AUDIT: CREATE industry locker)                   */
 /* ------------------------------------------------ */
 
 exports.createIndustryLocker = async (req) => {
-  const { payload, name, storeCompressed } = req.body;
+  const { payload, name, storeCompressed, org_id } = req.body;
 
   console.log("\n================ createIndustryLocker ================");
   console.log("name:", name);
@@ -248,6 +266,7 @@ exports.createIndustryLocker = async (req) => {
 
   if (!name) throw new Error("name is required");
   if (!payload) throw new Error("payload is required");
+  if (!org_id) throw new Error("org_id is required"); // ✅ for audit
 
   const parsed =
     typeof payload === "object" ? payload : parseConfiguration(payload);
@@ -291,6 +310,16 @@ exports.createIndustryLocker = async (req) => {
     .datastore()
     .table("industry_lockers")
     .insertRow({ name, configuration });
+
+  // ✅ AUDIT
+  await writeAuditLog(req, {
+    org_id,
+    action: "CREATE",
+    entity: "industry_lockers",
+    entity_id: row.ROWID,
+    after: { ROWID: row.ROWID, name, cabinetsCreated: cabinetIds.length, lockersCreated: totalLockersCreated },
+    extra: { cabinetIdsCount: cabinetIds.length, lockersCreated: totalLockersCreated },
+  });
 
   return {
     status: "Created",
@@ -349,8 +378,6 @@ exports.getIndustryLockerCabinets = async (req) => {
   const cabinetIds = Array.isArray(config?.cabinetIds)
     ? config.cabinetIds.map((id) => String(id).trim())
     : [];
-
-  // console.log("📦 Cabinet IDs from config:", cabinetIds);
 
   if (!cabinetIds.length) {
     return {
@@ -437,7 +464,7 @@ exports.getIndustryLockerCabinets = async (req) => {
 
 exports.getIndustryLockerCabinetDetails = async (req) => {
   const rowId = ensureRowId(req.params.rowId);
-  const cabinetId = ensureRowId(req.params.cabinetId); // ✅ cabinetId from route
+  const cabinetId = ensureRowId(req.params.cabinetId);
 
   const ds = catalystApp(req).datastore();
   const zcql = catalystApp(req).zcql();
@@ -452,7 +479,7 @@ exports.getIndustryLockerCabinetDetails = async (req) => {
   // 1) read industry_lockers config
   const record = await ds.table("industry_lockers").getRow(rowId);
   const raw = String(record?.configuration || "");
-  console.log("RAW PAYLOAD--",raw);
+  console.log("RAW PAYLOAD--", raw);
 
   console.log("   configLen=", raw.length);
   if (isTruncatedJsonString(raw))
@@ -473,9 +500,7 @@ exports.getIndustryLockerCabinetDetails = async (req) => {
   }
 
   // 3) fetch cabinet
-  const qCab = `SELECT ROWID, name, width, height, depth FROM cabinets WHERE ROWID = ${
-    cabinetId
-  }`;
+  const qCab = `SELECT ROWID, name, width, height, depth FROM cabinets WHERE ROWID = ${cabinetId}`;
   console.log("   🧾 ZCQL cabinet:", qCab);
 
   const cabRows = await zcql.executeZCQLQuery(qCab);
@@ -483,9 +508,7 @@ exports.getIndustryLockerCabinetDetails = async (req) => {
   if (!cab) throw new Error(`Cabinet not found for cabinetId=${cabinetId}`);
 
   // 4) fetch lockers for this cabinet
-  const qLockers = `SELECT * FROM lockers WHERE cabinet_id = ${
-    cabinetId
-  } ORDER BY rowNo, position`;
+  const qLockers = `SELECT * FROM lockers WHERE cabinet_id = ${cabinetId} ORDER BY rowNo, position`;
   console.log("   🧾 ZCQL lockers:", qLockers);
 
   const lockerRows = await zcql.executeZCQLQuery(qLockers);
@@ -527,20 +550,31 @@ exports.getIndustryLockerCabinetDetails = async (req) => {
 };
 
 /* ------------------------------------------------ */
-/* Normal lockers methods (keep your existing ones)  */
+/* Normal lockers methods (AUDIT on mutations)       */
 /* ------------------------------------------------ */
-// NOTE: keep your existing createLocker/getLockersByCabinet/getLockerById/updateLocker/deleteLocker/bookLocker below
-// exports.createLocker = async (req) => { ... }
 
-// -------------------- Normal Lockers --------------------
+// ✅ CREATE locker (AUDIT)
 exports.createLocker = async (req) => {
   const { cabinet_id, label, height, width } = req.body;
   if (!cabinet_id || !label) throw new Error("Missing fields");
 
-  return catalystApp(req)
+  const org_id = await resolveOrgIdFromCabinet(req, cabinet_id);
+
+  const created = await catalystApp(req)
     .datastore()
     .table("lockers")
     .insertRow({ cabinet_id, label, height, width, status: "available" });
+
+  await writeAuditLog(req, {
+    org_id,
+    action: "CREATE",
+    entity: "locker",
+    entity_id: created?.ROWID,
+    after: created,
+    extra: { cabinet_id },
+  });
+
+  return created;
 };
 
 exports.getLockersByCabinet = async (req) => {
@@ -565,27 +599,88 @@ exports.getLockersByCabinet = async (req) => {
 exports.getLockerById = async (req) =>
   catalystApp(req).datastore().table("lockers").getRow(req.params.id);
 
-exports.updateLocker = async (req) =>
-  catalystApp(req)
-    .datastore()
-    .table("lockers")
-    .updateRow({ ROWID: req.params.id, ...req.body });
+// ✅ UPDATE locker (AUDIT)
+exports.updateLocker = async (req) => {
+  const lockerId = req.params.id;
 
-exports.deleteLocker = async (req) =>
-  catalystApp(req)
-    .datastore()
-    .table("lockers")
-    .updateRow({ ROWID: req.params.id, status: "inactive" });
+  const table = catalystApp(req).datastore().table("lockers");
 
+  const before = await table.getRow(lockerId);
+  if (!before) throw new Error("Locker not found");
+
+  const org_id = await resolveOrgIdFromCabinet(req, before.cabinet_id);
+
+  await table.updateRow({ ROWID: lockerId, ...req.body });
+
+  const after = await table.getRow(lockerId);
+
+  await writeAuditLog(req, {
+    org_id,
+    action: "UPDATE",
+    entity: "locker",
+    entity_id: lockerId,
+    before,
+    after,
+    extra: { payload: req.body },
+  });
+
+  return after;
+};
+
+// ✅ DELETE locker (AUDIT)
+exports.deleteLocker = async (req) => {
+  const lockerId = req.params.id;
+
+  const table = catalystApp(req).datastore().table("lockers");
+
+  const before = await table.getRow(lockerId);
+  if (!before) throw new Error("Locker not found");
+
+  const org_id = await resolveOrgIdFromCabinet(req, before.cabinet_id);
+
+  await table.updateRow({ ROWID: lockerId, status: "inactive" });
+
+  const after = await table.getRow(lockerId);
+
+  await writeAuditLog(req, {
+    org_id,
+    action: "DELETE",
+    entity: "locker",
+    entity_id: lockerId,
+    before,
+    after,
+    extra: { reason: "status_inactive" },
+  });
+
+  return after;
+};
+
+// ✅ BOOK locker (AUDIT)
 exports.bookLocker = async (req) => {
   const { lockerId } = req.params;
   const { booking_id } = req.body;
   if (!booking_id) throw new Error("booking_id is required");
 
-  await catalystApp(req)
-    .datastore()
-    .table("lockers")
-    .updateRow({ ROWID: lockerId, status: "booked", booking_id });
+  const table = catalystApp(req).datastore().table("lockers");
+
+  const before = await table.getRow(lockerId);
+  if (!before) throw new Error("Locker not found");
+
+  const org_id = await resolveOrgIdFromCabinet(req, before.cabinet_id);
+
+  await table.updateRow({ ROWID: lockerId, status: "booked", booking_id });
+
+  const after = await table.getRow(lockerId);
+
+  await writeAuditLog(req, {
+    org_id,
+    action: "BOOK",
+    entity: "locker",
+    entity_id: lockerId,
+    before,
+    after,
+    extra: { booking_id },
+  });
 
   return { lockerId, status: "booked" };
 };
