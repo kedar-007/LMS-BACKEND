@@ -1,10 +1,22 @@
+// services/cabinet.service.js  ✅ UPDATED (audit logs added to CREATE/UPDATE/DELETE only)
+
 const catalystApp = require("../utils/catalyst");
+const { writeAuditLog } = require("../utils/auditLogger"); // ✅ make sure this exists
 
 /* =====================================================
-   CREATE CABINET + LOCKERS
+   CREATE CABINET + LOCKERS   (AUDIT: CREATE)
 ===================================================== */
 exports.createCabinetWithLockers = async (req) => {
-  const { org_id, branch_id, name, width, height, depth, lockers,locker_internal_depth } = req.body;
+  const {
+    org_id,
+    branch_id,
+    name,
+    width,
+    height,
+    depth,
+    lockers,
+    locker_internal_depth,
+  } = req.body;
 
   if (
     !org_id ||
@@ -17,8 +29,6 @@ exports.createCabinetWithLockers = async (req) => {
   ) {
     throw new Error("Missing required fields");
   }
-
-  console.log("Lockers",lockers);
 
   const app = catalystApp(req);
   const datastore = app.datastore();
@@ -36,7 +46,6 @@ exports.createCabinetWithLockers = async (req) => {
     status: "ACTIVE",
   });
 
-  console.log("Cabinet",cabinet);
   const cabinetId = cabinet.ROWID;
 
   /* ---------------------------
@@ -53,22 +62,44 @@ exports.createCabinetWithLockers = async (req) => {
       width: locker.width,
       status: "available",
       book_id: "",
-      height:locker.height,
-      rowNo:locker.RowNo,
-      position:locker.position,
-      price:locker.price,
+      height: locker.height,
+      rowNo: locker.RowNo,
+      position: locker.position,
+      price: locker.price,
       locker_internal_depth,
-      thickness:locker.thickness,
-      row_thickness:locker.row_thickness,
-
-
+      thickness: locker.thickness,
+      row_thickness: locker.row_thickness,
     };
   });
 
+  let insertedLockers = [];
   if (lockerRows.length > 0) {
-    const resLocker = await datastore.table("lockers").insertRows(lockerRows);
-
+    // insertRows may or may not return inserted rows depending on SDK behavior
+    await datastore.table("lockers").insertRows(lockerRows);
+    insertedLockers = lockerRows.map((l) => ({ ...l })); // keep snapshot for audit
   }
+
+  // ✅ AUDIT: CREATE cabinet + lockers in meta (keep it reasonable size)
+  await writeAuditLog(req, {
+    org_id,
+    action: "CREATE",
+    entity: "cabinet",
+    entity_id: cabinetId,
+    after: cabinet,
+    extra: {
+      branch_id,
+      lockers_created: lockerRows.length,
+      // keep only key locker fields to avoid varchar overflow in meta_data
+      lockers: insertedLockers.map((l) => ({
+        label: l.label,
+        width: l.width,
+        height: l.height,
+        rowNo: l.rowNo,
+        position: l.position,
+        price: l.price,
+      })),
+    },
+  });
 
   return {
     cabinet_id: cabinetId,
@@ -77,7 +108,7 @@ exports.createCabinetWithLockers = async (req) => {
 };
 
 /* =====================================================
-   GET CABINETS BY BRANCH
+   GET CABINETS BY BRANCH (NO AUDIT)
 ===================================================== */
 exports.getCabinetsByBranch = async (req) => {
   const { branch_id, org_id } = req.query;
@@ -101,7 +132,7 @@ exports.getCabinetsByBranch = async (req) => {
 };
 
 /* =====================================================
-   GET CABINET WITH LOCKERS
+   GET CABINET WITH LOCKERS (NO AUDIT)
 ===================================================== */
 exports.getCabinetWithLockers = async (req) => {
   const { cabinet_id } = req.params;
@@ -125,12 +156,10 @@ exports.getCabinetWithLockers = async (req) => {
 
   const rows = await zcql.executeZCQLQuery(query);
 
-
   if (!rows || rows.length === 0) {
     throw new Error("Cabinet not found");
   }
 
-  // Extract cabinet info from the first row
   const cabinet = {
     id: rows[0].cabinets.ROWID,
     name: rows[0].cabinets.name,
@@ -138,13 +167,13 @@ exports.getCabinetWithLockers = async (req) => {
     height: rows[0].cabinets.height,
     depth: rows[0].cabinets.depth,
     status: rows[0].cabinets.status,
-    lockers: []
+    lockers: [],
   };
 
   let available = 0;
   let booked = 0;
 
-  rows.forEach(row => {
+  rows.forEach((row) => {
     if (row.lockers && row.lockers.ROWID) {
       cabinet.lockers.push({
         id: row.lockers.ROWID,
@@ -152,14 +181,13 @@ exports.getCabinetWithLockers = async (req) => {
         width: row.lockers.width,
         status: row.lockers.status,
         book_id: row.lockers.book_id || "",
-        height:row.lockers.height,
-        rowNo:row.lockers.rowNo,
-        position:row.lockers.position,
-        price:row.lockers.price,
-        row_thickness:row.lockers.row_thickness,
-        locker_internal_depth:row.lockers.locker_internal_depth,
-        thickness:row.lockers.thickness,
-
+        height: row.lockers.height,
+        rowNo: row.lockers.rowNo,
+        position: row.lockers.position,
+        price: row.lockers.price,
+        row_thickness: row.lockers.row_thickness,
+        locker_internal_depth: row.lockers.locker_internal_depth,
+        thickness: row.lockers.thickness,
       });
 
       if (row.lockers.status === "available") available++;
@@ -170,37 +198,84 @@ exports.getCabinetWithLockers = async (req) => {
   cabinet.summary = {
     total: cabinet.lockers.length,
     available,
-    booked
+    booked,
   };
 
   return cabinet;
 };
 
 /* =====================================================
-   UPDATE CABINET
+   UPDATE CABINET (AUDIT: UPDATE)
 ===================================================== */
 exports.updateCabinet = async (req) => {
   const { id } = req.params;
   if (!id) throw new Error("Cabinet ID is required");
 
-  return catalystApp(req)
-    .datastore()
-    .table("cabinets")
-    .updateRow({
-      ROWID: id,
-      ...req.body,
-    });
+  const table = catalystApp(req).datastore().table("cabinets");
+
+  // ✅ BEFORE snapshot
+  const before = await table.getRow(id);
+  if (!before) throw new Error("Cabinet not found");
+
+  const org_id = before.org_id;
+
+  // prevent org_id changes from API payload
+  const { org_id: _ignoredOrg, ...safeBody } = req.body;
+
+  // update
+  await table.updateRow({ ROWID: id, ...safeBody });
+
+  // ✅ AFTER snapshot
+  const after = await table.getRow(id);
+
+  // ✅ AUDIT
+  await writeAuditLog(req, {
+    org_id,
+    action: "UPDATE",
+    entity: "cabinet",
+    entity_id: id,
+    before,
+    after,
+    extra: { payload: safeBody },
+  });
+
+  return after;
 };
 
 /* =====================================================
-   SOFT DELETE CABINET
+   SOFT DELETE CABINET (AUDIT: DELETE)
 ===================================================== */
 exports.deleteCabinet = async (req) => {
   const { id } = req.params;
   if (!id) throw new Error("Cabinet ID is required");
 
-  return catalystApp(req).datastore().table("cabinets").updateRow({
+  const table = catalystApp(req).datastore().table("cabinets");
+
+  // ✅ BEFORE snapshot
+  const before = await table.getRow(id);
+  if (!before) throw new Error("Cabinet not found");
+
+  const org_id = before.org_id;
+
+  // soft delete
+  await table.updateRow({
     ROWID: id,
     status: "INACTIVE",
   });
+
+  // ✅ AFTER snapshot
+  const after = await table.getRow(id);
+
+  // ✅ AUDIT
+  await writeAuditLog(req, {
+    org_id,
+    action: "DELETE",
+    entity: "cabinet",
+    entity_id: id,
+    before,
+    after,
+    extra: { reason: "status_inactive" },
+  });
+
+  return after;
 };
