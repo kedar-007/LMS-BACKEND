@@ -2,7 +2,6 @@
    Date Utilities (IST SAFE)
 ================================*/
 
-
 // YYYY-MM-DD HH:mm:ss
 function isValidDateTimeFormat(value) {
   return /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value);
@@ -22,6 +21,11 @@ function getCurrentISTDateTimeString() {
     )}`
   );
 }
+
+/* ===============================
+   AUDIT LOGGER ✅
+================================ */
+const { writeAuditLog } = require("../utils/auditLogger"); // ✅ add this
 
 /* ===============================
    EMAIL HELPERS
@@ -254,7 +258,7 @@ class CustomerService {
           position: l.position,
           status: l.status,
           book_id: l.book_id || "",
-          price:l.price,
+          price: l.price,
         });
 
         cabinet.summary.total++;
@@ -278,7 +282,7 @@ class CustomerService {
   }
 
   /* ===============================
-           BOOK LOCKER WITH EMAIL
+           BOOK LOCKER WITH EMAIL ✅ + AUDIT
         ================================*/
   static async bookLocker(req) {
     try {
@@ -321,6 +325,9 @@ class CustomerService {
       if (start_time >= end_time) {
         throw new Error("Invalid date range");
       }
+
+      // ✅ BEFORE snapshot of locker (for audit)
+      const lockerBefore = await datastore.table("lockers").getRow(String(locker_id));
 
       const lockerCheck = await zcql.executeZCQLQuery(`
         SELECT * FROM lockers
@@ -372,6 +379,9 @@ class CustomerService {
         book_id: booking.ROWID,
       });
 
+      // ✅ AFTER snapshot of locker (for audit)
+      const lockerAfter = await datastore.table("lockers").getRow(String(locker_id));
+
       const [orgRes, branchRes, cabinetRes, lockerRes] = await Promise.all([
         zcql.executeZCQLQuery(
           `SELECT * FROM organizations WHERE orgId='${org_id}'`
@@ -407,18 +417,48 @@ class CustomerService {
         }),
       });
 
+      // ✅ AUDIT #1: Booking created
+      await writeAuditLog(req, {
+        org_id,
+        action: "CREATE",
+        entity: "booking",
+        entity_id: booking.ROWID,
+        after: booking,
+        extra: {
+          locker_id,
+          branch_id,
+          cabinet_id,
+          start_time,
+          end_time,
+          months,
+          payment_id,
+          customer_id,
+        },
+      });
+
+      // ✅ AUDIT #2: Locker status changed to booked
+      await writeAuditLog(req, {
+        org_id,
+        action: "BOOK",
+        entity: "locker",
+        entity_id: locker_id,
+        before: lockerBefore,
+        after: lockerAfter,
+        extra: { booking_id: booking.ROWID },
+      });
+
       return {
         success: true,
         booking_id: booking.ROWID,
       };
     } catch (error) {
       console.error("CustomerService.bookLocker error:", error);
-      throw error; // controller will handle response
+      throw error;
     }
   }
 
   /* ===============================
-     BOOK VISIT APPOINTMENT
+     BOOK VISIT APPOINTMENT ✅ + AUDIT
   ================================ */
   static async bookAppointment(req) {
     try {
@@ -432,9 +472,19 @@ class CustomerService {
         throw new Error("Invalid datetime");
 
       const visitKey = Math.random().toString(36).substring(2, 8).toUpperCase();
-      console.log(visitKey);
+
+      // ✅ Resolve org_id properly (from locker -> cabinet -> branch -> org)
+      const lockerRow = await datastore.table("lockers").getRow(String(locker_id));
+      if (!lockerRow) throw new Error("Locker not found");
+
+      const cabinetRow = await datastore.table("cabinets").getRow(String(lockerRow.cabinet_id));
+      if (!cabinetRow) throw new Error("Cabinet not found");
+      const branchRow = await datastore.table("branches").getRow(String(cabinetRow.branch_id));
+      if (!branchRow) throw new Error("Branch not found");
+      const org_id = branchRow.org_id;
+
       const rowData = {
-        org_id: user.org_id,
+        org_id,
         locker_id,
         auth_user_id: user.user_id,
         visit_time,
@@ -442,10 +492,7 @@ class CustomerService {
         status: "CONFIRMED",
       };
 
-      console.log("PayLoad", rowData);
-      const appointment = await datastore
-        .table("appointments")
-        .insertRow(rowData);
+      const appointment = await datastore.table("appointments").insertRow(rowData);
 
       const [{ lockers }, { cabinets }, { branches }, { organizations }] = [
         ...(await zcql.executeZCQLQuery(
@@ -476,14 +523,24 @@ class CustomerService {
         }),
       });
 
+      // ✅ AUDIT: Appointment created
+      await writeAuditLog(req, {
+        org_id,
+        action: "CREATE",
+        entity: "appointment",
+        entity_id: appointment.ROWID,
+        after: appointment,
+        extra: { locker_id, visit_time, visit_key: visitKey },
+      });
+
       return {
         success: true,
         appointment_id: appointment.ROWID,
         visit_key: visitKey,
       };
     } catch (error) {
-      console.error("ERROR", error);
-      console.log("ERROR", error);
+      console.error("CustomerService.bookAppointment error:", error);
+      throw error;
     }
   }
 
@@ -529,10 +586,6 @@ class CustomerService {
     }
   }
 
-  /* 
-  Get My Lockers
-  */
-
   /* ===============================
    GET MY LOCKERS (VIA BOOKINGS)
 ================================ */
@@ -548,7 +601,6 @@ class CustomerService {
         });
       }
 
-      /* ---------- STEP 1: Fetch User Bookings ---------- */
       const bookingRows = await zcql.executeZCQLQuery(`
         SELECT locker_id
         FROM bookings
@@ -563,17 +615,14 @@ class CustomerService {
         });
       }
 
-      /* ---------- STEP 2: Extract Locker IDs ---------- */
       const lockerIds = bookingRows.map((r) => `'${r.bookings.locker_id}'`);
 
-      /* ---------- STEP 3: Fetch Lockers ---------- */
       const lockerRows = await zcql.executeZCQLQuery(`
         SELECT *
         FROM lockers
         WHERE ROWID IN (${lockerIds.join(",")})
       `);
 
-      /* ---------- STEP 4: Map Response ---------- */
       const lockers = lockerRows.map((r) => {
         const l = r.lockers;
         return {
@@ -652,258 +701,337 @@ class CustomerService {
     }
   }
 
-
   //Get Booking by Id
   static async getBookingById(req) {
     const zcql = req.catalystApp.zcql();
-    const user = await req.catalystApp.userManagement().getCurrentUser();
     const { bookingId } = req.params;
-  
+
     const rows = await zcql.executeZCQLQuery(`
       SELECT *
       FROM bookings
       WHERE ROWID='${bookingId}'
     `);
-  
+
     if (!rows.length) throw new Error("Booking not found");
-  
+
     return rows[0].bookings;
   }
-  
-  //Update Booking
+
+  //Update Booking ✅ + AUDIT
   static async updateBooking(req) {
     const datastore = req.catalystApp.datastore();
-    const user = await req.catalystApp.userManagement().getCurrentUser();
+    const zcql = req.catalystApp.zcql();
     const { bookingId } = req.params;
     const { start_date, end_date, months } = req.body;
-  
+
+    // before
+    const beforeRows = await zcql.executeZCQLQuery(
+      `SELECT * FROM bookings WHERE ROWID='${bookingId}'`
+    );
+    if (!beforeRows.length) throw new Error("Booking not found");
+    const before = beforeRows[0].bookings;
+
     const updateRes = await datastore.table("bookings").updateRow({
       ROWID: bookingId,
       start_date,
       end_date,
-      months
+      months,
     });
-  
-    return { updated: true,data:updateRes};
+
+    // after
+    const afterRows = await zcql.executeZCQLQuery(
+      `SELECT * FROM bookings WHERE ROWID='${bookingId}'`
+    );
+    const after = afterRows?.[0]?.bookings || null;
+
+    await writeAuditLog(req, {
+      org_id: before.org_id,
+      action: "UPDATE",
+      entity: "booking",
+      entity_id: bookingId,
+      before,
+      after,
+      extra: { start_date, end_date, months },
+    });
+
+    return { updated: true, data: updateRes };
   }
-//Cancel Booking
+
+  //Cancel Booking ✅ + AUDIT
   static async cancelBooking(req) {
     const datastore = req.catalystApp.datastore();
     const zcql = req.catalystApp.zcql();
     const { bookingId } = req.params;
-  
-    const booking = await zcql.executeZCQLQuery(`
+
+    const bookingRes = await zcql.executeZCQLQuery(`
       SELECT * FROM bookings WHERE ROWID='${bookingId}'
     `);
-  
-    if (!booking.length) throw new Error("Booking not found");
-  
-    const lockerId = booking[0].bookings.locker_id;
-  
+
+    if (!bookingRes.length) throw new Error("Booking not found");
+
+    const bookingBefore = bookingRes[0].bookings;
+    const lockerId = bookingBefore.locker_id;
+
+    const lockerBefore = await datastore.table("lockers").getRow(String(lockerId));
+
     await datastore.table("bookings").updateRow({
       ROWID: bookingId,
-      status: "CANCELLED"
+      status: "CANCELLED",
     });
-  
+
     await datastore.table("lockers").updateRow({
       ROWID: lockerId,
       status: "available",
-      book_id: ""
+      book_id: "",
     });
-  
+
+    const bookingAfterRes = await zcql.executeZCQLQuery(`
+      SELECT * FROM bookings WHERE ROWID='${bookingId}'
+    `);
+    const bookingAfter = bookingAfterRes?.[0]?.bookings || null;
+
+    const lockerAfter = await datastore.table("lockers").getRow(String(lockerId));
+
+    // ✅ AUDIT #1: booking cancelled
+    await writeAuditLog(req, {
+      org_id: bookingBefore.org_id,
+      action: "CANCEL",
+      entity: "booking",
+      entity_id: bookingId,
+      before: bookingBefore,
+      after: bookingAfter,
+      extra: { locker_id: lockerId },
+    });
+
+    // ✅ AUDIT #2: locker released
+    await writeAuditLog(req, {
+      org_id: bookingBefore.org_id,
+      action: "RELEASE",
+      entity: "locker",
+      entity_id: lockerId,
+      before: lockerBefore,
+      after: lockerAfter,
+      extra: { booking_id: bookingId },
+    });
+
     return { cancelled: true };
   }
-  
 
   //Appointment get by id
   static async getAppointmentById(req) {
     const zcql = req.catalystApp.zcql();
     const user = await req.catalystApp.userManagement().getCurrentUser();
     const { appointmentId } = req.params;
-  
+
     const rows = await zcql.executeZCQLQuery(`
       SELECT *
       FROM appointments
       WHERE ROWID='${appointmentId}'
         AND auth_user_id='${user.user_id}'
     `);
-  
+
     if (!rows.length) throw new Error("Appointment not found");
-  
+
     return rows[0].appointments;
   }
 
-  //Reschedule the appointment or update the appointment
+  //Reschedule the appointment ✅ + AUDIT
   static async updateAppointment(req) {
     const datastore = req.catalystApp.datastore();
+    const zcql = req.catalystApp.zcql();
     const { appointmentId } = req.params;
     const { visit_time } = req.body;
-  
+
+    const beforeRows = await zcql.executeZCQLQuery(
+      `SELECT * FROM appointments WHERE ROWID='${appointmentId}'`
+    );
+    if (!beforeRows.length) throw new Error("Appointment not found");
+    const before = beforeRows[0].appointments;
+
     await datastore.table("appointments").updateRow({
       ROWID: appointmentId,
-      visit_time
+      visit_time,
     });
-  
+
+    const afterRows = await zcql.executeZCQLQuery(
+      `SELECT * FROM appointments WHERE ROWID='${appointmentId}'`
+    );
+    const after = afterRows?.[0]?.appointments || null;
+
+    await writeAuditLog(req, {
+      org_id: before.org_id,
+      action: "UPDATE",
+      entity: "appointment",
+      entity_id: appointmentId,
+      before,
+      after,
+      extra: { visit_time },
+    });
+
     return { rescheduled: true };
   }
-  
-// Cancel Appointment
+
+  // Cancel Appointment ✅ + AUDIT
   static async cancelAppointment(req) {
     const datastore = req.catalystApp.datastore();
+    const zcql = req.catalystApp.zcql();
     const { appointmentId } = req.params;
-  
+
+    const beforeRows = await zcql.executeZCQLQuery(
+      `SELECT * FROM appointments WHERE ROWID='${appointmentId}'`
+    );
+    if (!beforeRows.length) throw new Error("Appointment not found");
+    const before = beforeRows[0].appointments;
+
     await datastore.table("appointments").updateRow({
       ROWID: appointmentId,
-      status: "CANCELLED"
+      status: "CANCELLED",
     });
-  
+
+    const afterRows = await zcql.executeZCQLQuery(
+      `SELECT * FROM appointments WHERE ROWID='${appointmentId}'`
+    );
+    const after = afterRows?.[0]?.appointments || null;
+
+    await writeAuditLog(req, {
+      org_id: before.org_id,
+      action: "CANCEL",
+      entity: "appointment",
+      entity_id: appointmentId,
+      before,
+      after,
+    });
+
     return { cancelled: true };
   }
-
 
   /* ===============================
    CUSTOMER ANALYTICS DASHBOARD
 ================================ */
-static async getMyAnalytics(req) {
-  try {
-    const zcql = req.catalystApp.zcql();
-    const user = await req.catalystApp.userManagement().getCurrentUser();
+  static async getMyAnalytics(req) {
+    try {
+      const zcql = req.catalystApp.zcql();
+      const user = await req.catalystApp.userManagement().getCurrentUser();
 
-    if (!user?.user_id) {
-      throw new Error("Unauthorized");
-    }
+      if (!user?.user_id) {
+        throw new Error("Unauthorized");
+      }
 
-    const nowIST = getCurrentISTDateTimeString();
+      const nowIST = getCurrentISTDateTimeString();
 
-    /* ===============================
-       BOOKINGS ANALYTICS
-    ================================ */
-    const bookingRows = await zcql.executeZCQLQuery(`
+      const bookingRows = await zcql.executeZCQLQuery(`
       SELECT *
       FROM bookings
       WHERE auth_user_id='${user.user_id}'
     `);
 
-    let totalBookings = bookingRows.length;
-    let activeBookings = 0;
-    let cancelledBookings = 0;
-    let expiredBookings = 0;
+      let totalBookings = bookingRows.length;
+      let activeBookings = 0;
+      let cancelledBookings = 0;
+      let expiredBookings = 0;
 
-    let firstBookingDate = null;
-    let lastBookingDate = null;
+      let firstBookingDate = null;
+      let lastBookingDate = null;
 
-    const branchUsageMap = {};
+      const branchUsageMap = {};
 
-    for (const row of bookingRows) {
-      const b = row.bookings;
+      for (const row of bookingRows) {
+        const b = row.bookings;
 
-      if (!firstBookingDate || b.CREATEDTIME < firstBookingDate) {
-        firstBookingDate = b.CREATEDTIME;
-      }
-      if (!lastBookingDate || b.CREATEDTIME > lastBookingDate) {
-        lastBookingDate = b.CREATEDTIME;
-      }
+        if (!firstBookingDate || b.CREATEDTIME < firstBookingDate) {
+          firstBookingDate = b.CREATEDTIME;
+        }
+        if (!lastBookingDate || b.CREATEDTIME > lastBookingDate) {
+          lastBookingDate = b.CREATEDTIME;
+        }
 
-      if (b.status === "ACTIVE") {
-        if (b.end_date < nowIST) {
-          expiredBookings++;
-        } else {
-          activeBookings++;
+        if (b.status === "ACTIVE") {
+          if (b.end_date < nowIST) {
+            expiredBookings++;
+          } else {
+            activeBookings++;
+          }
+        }
+
+        if (b.status === "CANCELLED") {
+          cancelledBookings++;
+        }
+
+        if (b.branch_id) {
+          branchUsageMap[b.branch_id] = (branchUsageMap[b.branch_id] || 0) + 1;
         }
       }
 
-      if (b.status === "CANCELLED") {
-        cancelledBookings++;
-      }
-
-      if (b.branch_id) {
-        branchUsageMap[b.branch_id] =
-          (branchUsageMap[b.branch_id] || 0) + 1;
-      }
-    }
-
-    /* ===============================
-       APPOINTMENTS ANALYTICS
-    ================================ */
-    const appointmentRows = await zcql.executeZCQLQuery(`
+      const appointmentRows = await zcql.executeZCQLQuery(`
       SELECT *
       FROM appointments
       WHERE auth_user_id='${user.user_id}'
     `);
 
-    let totalAppointments = appointmentRows.length;
-    let upcomingAppointments = 0;
-    let completedAppointments = 0;
-    let cancelledAppointments = 0;
+      let totalAppointments = appointmentRows.length;
+      let upcomingAppointments = 0;
+      let completedAppointments = 0;
+      let cancelledAppointments = 0;
 
-    for (const row of appointmentRows) {
-      const a = row.appointments;
+      for (const row of appointmentRows) {
+        const a = row.appointments;
 
-      if (a.status === "CANCELLED") {
-        cancelledAppointments++;
-      } else if (a.visit_time > nowIST) {
-        upcomingAppointments++;
-      } else {
-        completedAppointments++;
+        if (a.status === "CANCELLED") {
+          cancelledAppointments++;
+        } else if (a.visit_time > nowIST) {
+          upcomingAppointments++;
+        } else {
+          completedAppointments++;
+        }
       }
-    }
 
-    /* ===============================
-       FAVORITE BRANCH
-    ================================ */
-    let favoriteBranchId = null;
-    let maxVisits = 0;
+      let favoriteBranchId = null;
+      let maxVisits = 0;
 
-    for (const branchId in branchUsageMap) {
-      if (branchUsageMap[branchId] > maxVisits) {
-        maxVisits = branchUsageMap[branchId];
-        favoriteBranchId = branchId;
+      for (const branchId in branchUsageMap) {
+        if (branchUsageMap[branchId] > maxVisits) {
+          maxVisits = branchUsageMap[branchId];
+          favoriteBranchId = branchId;
+        }
       }
-    }
 
-    let favoriteBranch = null;
-    if (favoriteBranchId) {
-      const branchRes = await zcql.executeZCQLQuery(`
+      let favoriteBranch = null;
+      if (favoriteBranchId) {
+        const branchRes = await zcql.executeZCQLQuery(`
         SELECT * FROM branches WHERE ROWID='${favoriteBranchId}'
       `);
-      if (branchRes.length) {
-        favoriteBranch = {
-          branch_id: branchRes[0].branches.ROWID,
-          name: branchRes[0].branches.name,
-        };
+        if (branchRes.length) {
+          favoriteBranch = {
+            branch_id: branchRes[0].branches.ROWID,
+            name: branchRes[0].branches.name,
+          };
+        }
       }
+
+      return {
+        bookings: {
+          total: totalBookings,
+          active: activeBookings,
+          cancelled: cancelledBookings,
+          expired: expiredBookings,
+          first_booking_date: firstBookingDate,
+          last_booking_date: lastBookingDate,
+        },
+        appointments: {
+          total: totalAppointments,
+          upcoming: upcomingAppointments,
+          completed: completedAppointments,
+          cancelled: cancelledAppointments,
+        },
+        insights: {
+          favorite_branch: favoriteBranch,
+        },
+      };
+    } catch (error) {
+      console.error("getMyAnalytics error:", error);
+      throw error;
     }
-
-    /* ===============================
-       FINAL ANALYTICS RESPONSE
-    ================================ */
-    return {
-      bookings: {
-        total: totalBookings,
-        active: activeBookings,
-        cancelled: cancelledBookings,
-        expired: expiredBookings,
-        first_booking_date: firstBookingDate,
-        last_booking_date: lastBookingDate,
-      },
-      appointments: {
-        total: totalAppointments,
-        upcoming: upcomingAppointments,
-        completed: completedAppointments,
-        cancelled: cancelledAppointments,
-      },
-      insights: {
-        favorite_branch: favoriteBranch,
-      },
-    };
-  } catch (error) {
-    console.error("getMyAnalytics error:", error);
-    throw error;
   }
-}
-
-  
-  
 }
 
 module.exports = CustomerService;
