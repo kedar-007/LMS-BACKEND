@@ -435,17 +435,33 @@ class OrgAdminController {
         });
       }
 
-      // Catalyst instances (since you're passing req in constructor)
-      const datastore = this.datastore;
+      // Role ID → Role Name mapping
+      const ROLE_MAP = {
+        "17682000000591821": "CUSTOMER",
+        "17682000000568151": "ORG-USER",
+        "17682000000568001": "ADMIN",
+      };
 
-      // Fetch users belonging to the organization
-      let query = `SELECT *FROM users WHERE org_id = ${orgId}`;
+      const query = `SELECT * FROM users WHERE org_id = ${orgId}`;
       const usersRes = await this.zcql.executeZCQLQuery(query);
+
+      const formattedUsers = usersRes
+        .map((row) => {
+          const user = row.users;
+          const resolvedRole = ROLE_MAP[user.role] || user.role;
+
+          return {
+            ...user,
+            role: resolvedRole,
+          };
+        })
+        .filter((user) => user.role !== "ADMIN"); // 🚫 remove admins
+
       return res.status(200).json({
         success: true,
         message: "Organization users fetched successfully",
-        count: usersRes.length || 0,
-        data: usersRes,
+        count: formattedUsers.length,
+        data: formattedUsers,
       });
     } catch (error) {
       console.error("Get Org Users Error:", error);
@@ -1044,21 +1060,21 @@ class OrgAdminController {
     try {
       const org_id = req.params.orgId;
       const { stripe_secret_key, webhook_secret, currency } = req.body;
-  
+
       // Validate orgId
       if (!org_id) {
         return res.status(400).json({
           message: "Organization ID (orgId) is required",
         });
       }
-  
+
       // Ensure at least one field is sent
       if (!stripe_secret_key && !webhook_secret && !currency) {
         return res.status(400).json({
           message: "Provide at least one field to update",
         });
       }
-  
+
       //Check existing config
       const query = `
         SELECT ROWID
@@ -1066,36 +1082,35 @@ class OrgAdminController {
         WHERE org_id = '${org_id}'
       `;
       const result = await this.zcql.executeZCQLQuery(query);
-      console.log("Result",result);
-  
+      console.log("Result", result);
+
       if (result.length === 0) {
         return res.status(404).json({
           message: "Configurations not present",
         });
       }
-  
+
       const rowId = result[0].stripe_configurations.ROWID;
-  
+
       // Build partial update payload
       const updatePayload = {};
-  
-      if (stripe_secret_key) updatePayload.stripe_secret_key = stripe_secret_key;
+
+      if (stripe_secret_key)
+        updatePayload.stripe_secret_key = stripe_secret_key;
       if (webhook_secret) updatePayload.webhook_secret = webhook_secret;
       if (currency) updatePayload.currency = currency;
       updatePayload.ROWID = rowId;
-    
-  
+
       // Update only provided fields
       const response = await this.datastore
         .table("stripe_configurations")
         .updateRow(updatePayload);
-  
+
       return res.status(200).json({
         success: true,
         message: "Stripe configuration updated successfully",
         data: response,
       });
-  
     } catch (error) {
       console.error("ERROR in updateStripeConfig:", error);
       return res.status(500).json({
@@ -1104,7 +1119,6 @@ class OrgAdminController {
       });
     }
   }
-  
 }
 
 module.exports = OrgAdminController;
