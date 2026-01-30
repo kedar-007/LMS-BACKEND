@@ -13,40 +13,77 @@ class OrgAdminController {
 
   async createOrg(req, res) {
     try {
-      const { name, plan, orgId, logo } = req.body;
+      // ✅ Your actual bucket base URL
+      const BUCKET_BASE_URL = "https://org-logos-development.zohostratus.in";
+      console.log("📥 Create Org API called");
+      console.log("➡️ Raw req.body:", req.body);
+      console.log("➡️ Raw req.files:", req.files);
+
+      const { name, plan, orgId } = req.body;
+      const logoFile = req.files?.logo;
 
       if (!name || !orgId) {
         return res.status(400).json({
+          success: false,
           message: "Org details missing",
         });
       }
 
+      let logoUrl = null;
+
+      /**
+       * 1️⃣ Upload logo
+       */
+      if (logoFile) {
+        const stratus = this.catalystApp.stratus();
+        const bucket = stratus.bucket("org-logos");
+
+        const fileExt = logoFile.name.split(".").pop();
+        const fileName = `${orgId}_${Date.now()}.${fileExt}`;
+
+        const uploadResult = await bucket.putObject(fileName, logoFile.data, {
+          contentType: logoFile.mimetype,
+        });
+
+        // ✅ putObject returns TRUE
+        if (uploadResult === true) {
+          logoUrl = `${BUCKET_BASE_URL}/${fileName}`;
+          console.log("✅ Logo uploaded:", logoUrl);
+        } else {
+          console.warn("❌ Logo upload failed");
+        }
+      }
+
+      /**
+       * 2️⃣ Save org
+       */
       const rowData = {
         name,
         plan: plan || "FREE",
         status: "Active",
         orgId,
-        logo,
+        logo: logoUrl,
       };
 
-      console.log("Creating the orgnization");
       const orgResponse = await this.datastore
         .table("organizations")
         .insertRow(rowData);
 
-      const constResponse = {
-        orgId: orgResponse.orgId,
-        ROWID: orgResponse.ROWID,
-      };
       return res.status(201).json({
-        message: "Organization details created",
-        data: constResponse,
+        success: true,
+        message: "Organization created",
+        data: {
+          orgId,
+          ROWID: orgResponse.ROWID,
+          logo: logoUrl,
+        },
       });
     } catch (error) {
-      console.error("Create Org Error:", error);
+      console.error("❌ Create Org Error:", error);
       return res.status(500).json({
         success: false,
         message: "Internal Server Error",
+        error: error?.message,
       });
     }
   }

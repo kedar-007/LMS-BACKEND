@@ -6,6 +6,7 @@
 	"dependencies": {
 		"cors": "^2.8.5",
 		"express": "^5.2.1",
+		"express-fileupload": "^1.5.2",
 		"zcatalyst-sdk-node": "latest"
 	}
 }
