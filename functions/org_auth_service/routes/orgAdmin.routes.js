@@ -17,10 +17,16 @@ router.post("/create-org", (req, res) => {
   return new OrgAdminController(req).createOrg(req, res);
 });
 
+// Update Organization
+router.post("/update-org", (req, res) => {
+  return new OrgAdminController(req).updateOrg(req, res);
+});
+
 // Get Organization Details
 router.get("/org-details", (req, res) => {
   return new OrgAdminController(req).getOrgdetails(req, res);
 });
+
 
 /* ================================
    USER MANAGEMENT
