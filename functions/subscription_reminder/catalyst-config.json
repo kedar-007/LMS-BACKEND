@@ -1,0 +1,11 @@
+{
+	"deployment": {
+		"name": "subscription_reminder",
+		"stack": "python_3_9",
+		"type": "cron",
+		"env_variables": {}
+	},
+	"execution": {
+		"main": "main.py"
+	}
+}
