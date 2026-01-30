@@ -1119,6 +1119,164 @@ class OrgAdminController {
       });
     }
   }
+
+  //{Payment analytics}
+  async getPaymentAnalytics(req, res) {
+    try {
+      const org_id = req.params.orgId;
+
+      if (!org_id) {
+        return res.status(400).json({
+          message: "org_id is required",
+        });
+      }
+
+      /**
+       * 1️⃣ Fetch all payments for the org
+       * (Catalyst safe query)
+       */
+      const query = `
+      SELECT amount, CREATEDTIME, status
+      FROM payments
+      WHERE org_id = '${org_id}'
+    `;
+
+      const result = await this.zcql.executeZCQLQuery(query);
+
+      let totalCollected = 0;
+
+      let successCount = 0;
+      let failedCount = 0;
+      let pendingCount = 0;
+
+      let failedAmount = 0;
+      let pendingAmount = 0;
+
+      const monthlyMap = {};
+
+      /**
+       * 2️⃣ Filter + calculate in Node.js
+       */
+      result.forEach((row) => {
+        const payment = row.payments;
+
+        const amount = Number(payment.amount || 0);
+        const status = payment.status;
+        const createdTime = new Date(payment.CREATEDTIME);
+
+        switch (status) {
+          case "SUCCESS":
+            successCount++;
+            totalCollected += amount;
+
+            const year = createdTime.getFullYear();
+            const month = String(createdTime.getMonth() + 1).padStart(2, "0");
+            const key = `${year}-${month}`;
+
+            monthlyMap[key] = (monthlyMap[key] || 0) + amount;
+            break;
+
+          case "FAILED":
+            failedCount++;
+            failedAmount += amount;
+            break;
+
+          case "PENDING":
+            pendingCount++;
+            pendingAmount += amount;
+            break;
+
+          default:
+            // ignore or log unknown statuses
+            break;
+        }
+      });
+
+      /**
+       * 3️⃣ Convert monthly map to sorted array
+       */
+      const monthlyCollections = Object.keys(monthlyMap)
+        .sort()
+        .map((key) => {
+          const [year, month] = key.split("-");
+          return {
+            year: Number(year),
+            month: Number(month),
+            amount: monthlyMap[key],
+          };
+        });
+
+      /**
+       * 4️⃣ Final Response
+       */
+      return res.status(200).json({
+        success: true,
+        org_id,
+        analytics: {
+          totalCollectedTillDate: totalCollected,
+
+          counts: {
+            success: successCount,
+            failed: failedCount,
+            pending: pendingCount,
+            total: successCount + failedCount + pendingCount,
+          },
+
+          amounts: {
+            success: totalCollected,
+            failed: failedAmount,
+            pending: pendingAmount,
+          },
+
+          monthlyCollections,
+        },
+      });
+    } catch (error) {
+      console.error("ERROR", error);
+      return res.status(500).json({
+        message: "Internal server error",
+        error: error?.message,
+      });
+    }
+  }
+
+  async getRecentOrgPayments(req, res) {
+    try {
+      const { orgId } = req.params;
+      const { limit = 10 } = req.query;
+
+      if (!orgId) {
+        return res.status(400).json({
+          success: false,
+          message: "Organization ID is required",
+        });
+      }
+
+      const query = `
+      SELECT * FROM payments
+      WHERE org_id = ${orgId}
+      ORDER BY CREATEDTIME DESC
+      LIMIT ${Number(limit)}
+    `;
+
+      const paymentsRes = await this.zcql.executeZCQLQuery(query);
+
+      const payments = paymentsRes.map((row) => row.payments);
+
+      return res.status(200).json({
+        success: true,
+        message: "Recent payments fetched successfully",
+        count: payments.length,
+        data: payments,
+      });
+    } catch (error) {
+      console.error("Get Recent Payments Error:", error);
+      return res.status(500).json({
+        success: false,
+        message: error.message || "Failed to fetch recent payments",
+      });
+    }
+  }
 }
 
 module.exports = OrgAdminController;

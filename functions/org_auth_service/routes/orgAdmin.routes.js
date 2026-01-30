@@ -105,4 +105,21 @@ router.put("/:orgId/stripe-config",(req,res) =>{
   return new OrgAdminController(req).updateStripeConfig(req,res);
 })
 
+
+/* 
+=============================
+Organization Payment analytics
+=============================
+*/
+
+router.get("/:orgId/payment-analytics",(req,res) =>{
+  return new OrgAdminController(req).getPaymentAnalytics(req,res);
+})
+
+//get recent payments in the organizations
+
+router.get("/:orgId/payments/recent",(req,res) =>{
+  return new OrgAdminController(req).getRecentOrgPayments(req,res);
+})
+
 module.exports = router;
