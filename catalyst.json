@@ -10,7 +10,8 @@
       "user_confirmation",
       "payment_service",
       "lms_function",
-      "audit_service"
+      "audit_service",
+      "subscription_reminder"
     ],
     "ignore": [],
     "source": "functions"
