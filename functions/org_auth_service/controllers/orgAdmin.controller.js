@@ -88,6 +88,134 @@ class OrgAdminController {
     }
   }
 
+  async updateOrg(req, res) {
+    try {
+      const BUCKET_BASE_URL = "https://org-logos-development.zohostratus.in";
+      console.log("📥 Update Org API called");
+
+      console.log("➡️ req.body =", req.body);
+      console.log(
+        "➡️ req.files keys =",
+        req.files ? Object.keys(req.files) : "NO FILES"
+      );
+
+      const { orgId, name, plan, status } = req.body;
+      const logoFile = req.files?.logo;
+
+      console.log("➡️ Parsed Inputs:", { orgId, name, plan, status });
+      console.log("➡️ Logo file present:", !!logoFile);
+
+      if (!orgId) {
+        console.error("❌ orgId missing in request");
+        return res.status(400).json({
+          success: false,
+          message: "orgId is required to update organization",
+        });
+      }
+
+      const stratus = this.catalystApp.stratus();
+      const bucket = stratus.bucket("org-logos");
+      const zcql = this.catalystApp.zcql();
+
+      // 1️⃣ Fetch existing org using ZCQL
+      const query = `
+      SELECT ROWID, logo, name, plan, status 
+      FROM organizations 
+      WHERE orgId = '${orgId}'
+    `;
+      console.log("🟡 ZCQL QUERY:", query);
+
+      const result = await zcql.executeZCQLQuery(query);
+      console.log("🟡 ZCQL RESULT RAW:", JSON.stringify(result, null, 2));
+
+      if (!result || result.length === 0) {
+        console.warn("⚠️ Organization not found for orgId:", orgId);
+        return res.status(404).json({
+          success: false,
+          message: "Organization not found",
+        });
+      }
+
+      // ⚠️ NOTE: ZCQL wraps result inside table name
+      const existingOrg = result[0].organizations;
+      console.log("✅ Existing Org Record:", existingOrg);
+
+      let logoUrl = existingOrg.logo;
+      console.log("➡️ Existing logo URL:", logoUrl);
+
+      // 2️⃣ Delete existing logo if new one is uploaded
+      if (logoFile && existingOrg.logo) {
+        try {
+          const fileName = existingOrg.logo.split("/").pop();
+          console.log("🗑️ Deleting old logo:", fileName);
+
+          const deleteResult = await bucket.deleteObject(fileName);
+          console.log("🗑️ Delete result:", deleteResult);
+        } catch (err) {
+          console.warn("⚠️ Failed to delete existing logo:", err.message);
+        }
+      }
+
+      // 3️⃣ Upload new logo if provided
+      if (logoFile) {
+        console.log("⬆️ Uploading new logo...");
+        console.log("⬆️ File info:", {
+          name: logoFile.name,
+          size: logoFile.size,
+          type: logoFile.mimetype,
+        });
+
+        const fileExt = logoFile.name.split(".").pop();
+        const fileName = `${orgId}_${Date.now()}.${fileExt}`;
+
+        const uploadResult = await bucket.putObject(fileName, logoFile.data, {
+          contentType: logoFile.mimetype,
+        });
+
+        console.log("⬆️ Upload result:", uploadResult);
+
+        if (uploadResult === true) {
+          logoUrl = `${BUCKET_BASE_URL}/${fileName}`;
+          console.log("✅ New logo URL:", logoUrl);
+        } else {
+          console.warn("❌ Logo upload failed, keeping old logo");
+        }
+      }
+
+      // 4️⃣ Update org using Catalyst Datastore updateRow
+      const updatedData = {
+        ROWID: existingOrg.ROWID,
+        name: name || existingOrg.name,
+        plan: plan || existingOrg.plan,
+        status: status || existingOrg.status,
+        logo: logoUrl,
+      };
+
+      console.log("🟢 Updating org with data:", updatedData);
+
+      await this.datastore.table("organizations").updateRow(updatedData);
+
+      console.log("✅ Organization updated successfully for orgId:", orgId);
+
+      return res.status(200).json({
+        success: true,
+        message: "Organization updated successfully",
+        data: {
+          orgId,
+          ROWID: existingOrg.ROWID,
+          ...updatedData,
+        },
+      });
+    } catch (error) {
+      console.error("❌ Update Org Error:", error);
+      return res.status(500).json({
+        success: false,
+        message: "Internal Server Error",
+        error: error?.message,
+      });
+    }
+  }
+
   async getOrgdetails(req, res) {
     try {
       const currUser = await this.getCurrentUser(req, res);
