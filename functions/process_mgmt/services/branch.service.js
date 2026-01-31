@@ -1,7 +1,7 @@
-// services/branch.service.js  ✅ UPDATED (with audit logs added only to POST/PUT/DELETE)
+// services/branch.service.js  UPDATED (with audit logs added only to POST/PUT/DELETE)
 
 const catalystApp = require("../utils/catalyst");
-const { writeAuditLog } = require("../utils/auditLogger"); // ✅ add this helper (given below)
+const { writeAuditLog } = require("../utils/auditLogger"); // add this helper (given below)
 
 // -------------------------
 // CREATE (POST /branches)
@@ -16,7 +16,7 @@ exports.createBranch = async (req) => {
     .insertRow({ org_id, name, address, status: "ACTIVE", branch_code });
 
   console.log("CREATED - ", created);
-  // ✅ AUDIT: CREATE
+  //AUDIT: CREATE
   await writeAuditLog(req, {
     org_id,
     action: "CREATE",

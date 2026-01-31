@@ -29,14 +29,19 @@ function diff(before = {}, after = {}) {
 }
 
 function reqMeta(req) {
+  const ip = req.headers["x-forwarded-for"]
+    ? req.headers["x-forwarded-for"].split(",")[0].trim()
+    : req.ip || req.connection.remoteAddress || "";
+
   return {
     request_id: req.headers["x-request-id"] || crypto.randomUUID(),
-    ip: (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || "",
+    ip,
     user_agent: req.headers["user-agent"] || "",
     path: req.originalUrl || req.url || "",
     method: req.method || "",
   };
 }
+
 
 async function getActor(req) {
   try {
