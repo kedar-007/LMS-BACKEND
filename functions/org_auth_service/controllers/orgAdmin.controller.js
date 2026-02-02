@@ -12,55 +12,62 @@ class OrgAdminController {
   }
 
   async createOrg(req, res) {
-    try {
-      // ✅ Your actual bucket base URL
-      const BUCKET_BASE_URL = "https://org-logos-development.zohostratus.in";
-      console.log("📥 Create Org API called");
-      console.log("➡️ Raw req.body:", req.body);
-      console.log("➡️ Raw req.files:", req.files);
+    console.log("✅ [Controller] createOrg hit");
 
-      const { name, plan, orgId } = req.body;
+    try {
+      const BUCKET_BASE_URL = "https://org-logos-development.zohostratus.in";
+
+      const { name, plan, orgId, status } = req.body;
       const logoFile = req.files?.logo;
 
       if (!name || !orgId) {
         return res.status(400).json({
           success: false,
-          message: "Org details missing",
+          message: "Org details missing (name/orgId)",
+        });
+      }
+
+      // ✅ if file was truncated due to size limit, return 413
+      if (logoFile?.truncated) {
+        return res.status(413).json({
+          success: false,
+          message: "Logo upload failed: file exceeded size limit.",
         });
       }
 
       let logoUrl = null;
 
-      /**
-       * 1️⃣ Upload logo
-       */
       if (logoFile) {
+        console.log("📦 Logo received:", {
+          name: logoFile.name,
+          size: logoFile.size,
+          mimetype: logoFile.mimetype,
+        });
+
         const stratus = this.catalystApp.stratus();
         const bucket = stratus.bucket("org-logos");
 
-        const fileExt = logoFile.name.split(".").pop();
+        const fileExt = (logoFile.name.split(".").pop() || "png").toLowerCase();
         const fileName = `${orgId}_${Date.now()}.${fileExt}`;
 
         const uploadResult = await bucket.putObject(fileName, logoFile.data, {
           contentType: logoFile.mimetype,
         });
 
-        // ✅ putObject returns TRUE
         if (uploadResult === true) {
           logoUrl = `${BUCKET_BASE_URL}/${fileName}`;
           console.log("✅ Logo uploaded:", logoUrl);
         } else {
           console.warn("❌ Logo upload failed");
         }
+      } else {
+        console.log("ℹ️ No logo file sent");
       }
 
-      /**
-       * 2️⃣ Save org
-       */
       const rowData = {
         name,
         plan: plan || "FREE",
-        status: "Active",
+        status: status || "ACTIVE",
         orgId,
         logo: logoUrl,
       };
@@ -87,6 +94,8 @@ class OrgAdminController {
       });
     }
   }
+
+
 
   async updateOrg(req, res) {
     try {
@@ -244,7 +253,7 @@ class OrgAdminController {
         success: true,
         data: org,
       });
-    } catch (error) {}
+    } catch (error) { }
   }
 
   async inviteUserOrg(req, res) {
@@ -741,12 +750,22 @@ class OrgAdminController {
       const zcql = this.zcql;
 
       /* ---------------------------------------------------
-         BASIC COUNTS
+         HELPER: chunk array (ZCQL-safe OR limits)
+      --------------------------------------------------- */
+      function chunk(array, size = 200) {
+        const result = [];
+        for (let i = 0; i < array.length; i += size) {
+          result.push(array.slice(i, i + size));
+        }
+        return result;
+      }
+
+      /* ---------------------------------------------------
+         BASIC COUNTS (except lockers)
       --------------------------------------------------- */
       const [
         branchesCount,
         cabinetsCount,
-        lockersCount,
         customersCount,
         bookingsCount,
       ] = await Promise.all([
@@ -756,7 +775,6 @@ class OrgAdminController {
         zcql.executeZCQLQuery(
           `SELECT COUNT(ROWID) FROM cabinets WHERE org_id = ${orgId}`
         ),
-        zcql.executeZCQLQuery(`SELECT COUNT(ROWID) FROM lockers`),
         zcql.executeZCQLQuery(
           `SELECT COUNT(ROWID) FROM users 
            WHERE org_id = ${orgId} 
@@ -768,34 +786,65 @@ class OrgAdminController {
       ]);
 
       /* ---------------------------------------------------
-         FETCH RAW DATA
+         FETCH BRANCHES & CABINETS (ORG-SCOPED)
       --------------------------------------------------- */
-      const [branches, cabinets, lockers, bookings, customers] =
-        await Promise.all([
-          zcql.executeZCQLQuery(
-            `SELECT ROWID, name, CREATEDTIME 
-             FROM branches 
-             WHERE org_id = ${orgId}
-             ORDER BY CREATEDTIME DESC`
-          ),
-          zcql.executeZCQLQuery(
-            `SELECT ROWID, branch_id 
-             FROM cabinets 
-             WHERE org_id = ${orgId}`
-          ),
-          zcql.executeZCQLQuery(`SELECT ROWID, cabinet_id FROM lockers`),
-          zcql.executeZCQLQuery(
-            `SELECT CREATEDTIME 
-             FROM bookings 
-             WHERE org_id = ${orgId}`
-          ),
-          zcql.executeZCQLQuery(
-            `SELECT CREATEDTIME 
-             FROM users 
-             WHERE org_id = ${orgId}
-             AND role = '17682000000591821'`
-          ),
-        ]);
+      const [branches, cabinets] = await Promise.all([
+        zcql.executeZCQLQuery(
+          `SELECT ROWID, name, CREATEDTIME 
+           FROM branches 
+           WHERE org_id = ${orgId}
+           ORDER BY CREATEDTIME DESC`
+        ),
+        zcql.executeZCQLQuery(
+          `SELECT ROWID, branch_id 
+           FROM cabinets 
+           WHERE org_id = ${orgId}`
+        ),
+      ]);
+
+      const cabinetIds = cabinets.map(
+        (row) => row.cabinets.ROWID
+      );
+
+      /* ---------------------------------------------------
+         FETCH LOCKERS (ZCQL-SAFE, VIA OR CHUNKS)
+      --------------------------------------------------- */
+      let lockers = [];
+
+      if (cabinetIds.length) {
+        for (const ids of chunk(cabinetIds, 200)) {
+          const whereClause = ids
+            .map((id) => `cabinet_id = ${id}`)
+            .join(" OR ");
+
+          const rows = await zcql.executeZCQLQuery(
+            `SELECT ROWID, cabinet_id 
+             FROM lockers 
+             WHERE ${whereClause}`
+          );
+
+          lockers.push(...rows);
+        }
+      }
+
+      const totalLockers = lockers.length;
+
+      /* ---------------------------------------------------
+         FETCH BOOKINGS & CUSTOMERS (ORG-SCOPED)
+      --------------------------------------------------- */
+      const [bookings, customers] = await Promise.all([
+        zcql.executeZCQLQuery(
+          `SELECT CREATEDTIME 
+           FROM bookings 
+           WHERE org_id = ${orgId}`
+        ),
+        zcql.executeZCQLQuery(
+          `SELECT CREATEDTIME 
+           FROM users 
+           WHERE org_id = ${orgId}
+           AND role = '17682000000591821'`
+        ),
+      ]);
 
       /* ---------------------------------------------------
          BRANCH → CABINET → LOCKER MAPPING
@@ -804,7 +853,8 @@ class OrgAdminController {
       // cabinet_id → branch_id
       const cabinetToBranchMap = {};
       cabinets.forEach((row) => {
-        cabinetToBranchMap[row.cabinets.ROWID] = row.cabinets.branch_id;
+        cabinetToBranchMap[row.cabinets.ROWID] =
+          row.cabinets.branch_id;
       });
 
       // branch_id → { name, lockers }
@@ -840,12 +890,13 @@ class OrgAdminController {
           date.getMonth() + 1
         ).padStart(2, "0")}`;
 
-        bookingsPerMonthMap[key] = (bookingsPerMonthMap[key] || 0) + 1;
+        bookingsPerMonthMap[key] =
+          (bookingsPerMonthMap[key] || 0) + 1;
       });
 
-      const bookingsPerMonth = Object.entries(bookingsPerMonthMap).map(
-        ([month, count]) => ({ month, count })
-      );
+      const bookingsPerMonth = Object.entries(
+        bookingsPerMonthMap
+      ).map(([month, count]) => ({ month, count }));
 
       /* ---------------------------------------------------
          CUSTOMERS PER MONTH
@@ -858,12 +909,13 @@ class OrgAdminController {
           date.getMonth() + 1
         ).padStart(2, "0")}`;
 
-        customersPerMonthMap[key] = (customersPerMonthMap[key] || 0) + 1;
+        customersPerMonthMap[key] =
+          (customersPerMonthMap[key] || 0) + 1;
       });
 
-      const customersPerMonth = Object.entries(customersPerMonthMap).map(
-        ([month, count]) => ({ month, count })
-      );
+      const customersPerMonth = Object.entries(
+        customersPerMonthMap
+      ).map(([month, count]) => ({ month, count }));
 
       /* ---------------------------------------------------
          RECENT BRANCHES (LAST 5)
@@ -886,14 +938,13 @@ class OrgAdminController {
           total_cabinets: Number(
             cabinetsCount[0]?.cabinets["COUNT(ROWID)"] || 0
           ),
-          total_lockers: Number(lockersCount[0]?.lockers["COUNT(ROWID)"] || 0),
+          total_lockers: totalLockers,
           total_customers: Number(
             customersCount[0]?.users["COUNT(ROWID)"] || 0
           ),
           total_bookings: Number(
             bookingsCount[0]?.bookings["COUNT(ROWID)"] || 0
           ),
-
           branch_wise_lockers: branchWiseLockers,
           recent_branches: recentBranches,
           bookings_per_month: bookingsPerMonth,
