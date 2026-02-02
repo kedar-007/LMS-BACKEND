@@ -739,14 +739,24 @@ class OrgAdminController {
     try {
       const { orgId } = req.params;
       const zcql = this.zcql;
-
+  
       /* ---------------------------------------------------
-         BASIC COUNTS
+         HELPER: chunk array (ZCQL-safe OR limits)
+      --------------------------------------------------- */
+      function chunk(array, size = 200) {
+        const result = [];
+        for (let i = 0; i < array.length; i += size) {
+          result.push(array.slice(i, i + size));
+        }
+        return result;
+      }
+  
+      /* ---------------------------------------------------
+         BASIC COUNTS (except lockers)
       --------------------------------------------------- */
       const [
         branchesCount,
         cabinetsCount,
-        lockersCount,
         customersCount,
         bookingsCount,
       ] = await Promise.all([
@@ -756,7 +766,6 @@ class OrgAdminController {
         zcql.executeZCQLQuery(
           `SELECT COUNT(ROWID) FROM cabinets WHERE org_id = ${orgId}`
         ),
-        zcql.executeZCQLQuery(`SELECT COUNT(ROWID) FROM lockers`),
         zcql.executeZCQLQuery(
           `SELECT COUNT(ROWID) FROM users 
            WHERE org_id = ${orgId} 
@@ -766,47 +775,79 @@ class OrgAdminController {
           `SELECT COUNT(ROWID) FROM bookings WHERE org_id = ${orgId}`
         ),
       ]);
-
+  
       /* ---------------------------------------------------
-         FETCH RAW DATA
+         FETCH BRANCHES & CABINETS (ORG-SCOPED)
       --------------------------------------------------- */
-      const [branches, cabinets, lockers, bookings, customers] =
-        await Promise.all([
-          zcql.executeZCQLQuery(
-            `SELECT ROWID, name, CREATEDTIME 
-             FROM branches 
-             WHERE org_id = ${orgId}
-             ORDER BY CREATEDTIME DESC`
-          ),
-          zcql.executeZCQLQuery(
-            `SELECT ROWID, branch_id 
-             FROM cabinets 
-             WHERE org_id = ${orgId}`
-          ),
-          zcql.executeZCQLQuery(`SELECT ROWID, cabinet_id FROM lockers`),
-          zcql.executeZCQLQuery(
-            `SELECT CREATEDTIME 
-             FROM bookings 
-             WHERE org_id = ${orgId}`
-          ),
-          zcql.executeZCQLQuery(
-            `SELECT CREATEDTIME 
-             FROM users 
-             WHERE org_id = ${orgId}
-             AND role = '17682000000591821'`
-          ),
-        ]);
-
+      const [branches, cabinets] = await Promise.all([
+        zcql.executeZCQLQuery(
+          `SELECT ROWID, name, CREATEDTIME 
+           FROM branches 
+           WHERE org_id = ${orgId}
+           ORDER BY CREATEDTIME DESC`
+        ),
+        zcql.executeZCQLQuery(
+          `SELECT ROWID, branch_id 
+           FROM cabinets 
+           WHERE org_id = ${orgId}`
+        ),
+      ]);
+  
+      const cabinetIds = cabinets.map(
+        (row) => row.cabinets.ROWID
+      );
+  
+      /* ---------------------------------------------------
+         FETCH LOCKERS (ZCQL-SAFE, VIA OR CHUNKS)
+      --------------------------------------------------- */
+      let lockers = [];
+  
+      if (cabinetIds.length) {
+        for (const ids of chunk(cabinetIds, 200)) {
+          const whereClause = ids
+            .map((id) => `cabinet_id = ${id}`)
+            .join(" OR ");
+  
+          const rows = await zcql.executeZCQLQuery(
+            `SELECT ROWID, cabinet_id 
+             FROM lockers 
+             WHERE ${whereClause}`
+          );
+  
+          lockers.push(...rows);
+        }
+      }
+  
+      const totalLockers = lockers.length;
+  
+      /* ---------------------------------------------------
+         FETCH BOOKINGS & CUSTOMERS (ORG-SCOPED)
+      --------------------------------------------------- */
+      const [bookings, customers] = await Promise.all([
+        zcql.executeZCQLQuery(
+          `SELECT CREATEDTIME 
+           FROM bookings 
+           WHERE org_id = ${orgId}`
+        ),
+        zcql.executeZCQLQuery(
+          `SELECT CREATEDTIME 
+           FROM users 
+           WHERE org_id = ${orgId}
+           AND role = '17682000000591821'`
+        ),
+      ]);
+  
       /* ---------------------------------------------------
          BRANCH → CABINET → LOCKER MAPPING
       --------------------------------------------------- */
-
+  
       // cabinet_id → branch_id
       const cabinetToBranchMap = {};
       cabinets.forEach((row) => {
-        cabinetToBranchMap[row.cabinets.ROWID] = row.cabinets.branch_id;
+        cabinetToBranchMap[row.cabinets.ROWID] =
+          row.cabinets.branch_id;
       });
-
+  
       // branch_id → { name, lockers }
       const branchMap = {};
       branches.forEach((row) => {
@@ -816,55 +857,57 @@ class OrgAdminController {
           lockers: 0,
         };
       });
-
+  
       // count lockers per branch
       lockers.forEach((row) => {
         const cabinetId = row.lockers.cabinet_id;
         const branchId = cabinetToBranchMap[cabinetId];
-
+  
         if (branchId && branchMap[branchId]) {
           branchMap[branchId].lockers++;
         }
       });
-
+  
       const branchWiseLockers = Object.values(branchMap);
-
+  
       /* ---------------------------------------------------
          BOOKINGS PER MONTH
       --------------------------------------------------- */
       const bookingsPerMonthMap = {};
-
+  
       bookings.forEach((row) => {
         const date = new Date(row.bookings.CREATEDTIME);
         const key = `${date.getFullYear()}-${String(
           date.getMonth() + 1
         ).padStart(2, "0")}`;
-
-        bookingsPerMonthMap[key] = (bookingsPerMonthMap[key] || 0) + 1;
+  
+        bookingsPerMonthMap[key] =
+          (bookingsPerMonthMap[key] || 0) + 1;
       });
-
-      const bookingsPerMonth = Object.entries(bookingsPerMonthMap).map(
-        ([month, count]) => ({ month, count })
-      );
-
+  
+      const bookingsPerMonth = Object.entries(
+        bookingsPerMonthMap
+      ).map(([month, count]) => ({ month, count }));
+  
       /* ---------------------------------------------------
          CUSTOMERS PER MONTH
       --------------------------------------------------- */
       const customersPerMonthMap = {};
-
+  
       customers.forEach((row) => {
         const date = new Date(row.users.CREATEDTIME);
         const key = `${date.getFullYear()}-${String(
           date.getMonth() + 1
         ).padStart(2, "0")}`;
-
-        customersPerMonthMap[key] = (customersPerMonthMap[key] || 0) + 1;
+  
+        customersPerMonthMap[key] =
+          (customersPerMonthMap[key] || 0) + 1;
       });
-
-      const customersPerMonth = Object.entries(customersPerMonthMap).map(
-        ([month, count]) => ({ month, count })
-      );
-
+  
+      const customersPerMonth = Object.entries(
+        customersPerMonthMap
+      ).map(([month, count]) => ({ month, count }));
+  
       /* ---------------------------------------------------
          RECENT BRANCHES (LAST 5)
       --------------------------------------------------- */
@@ -873,7 +916,7 @@ class OrgAdminController {
         name: row.branches.name,
         created_at: row.branches.CREATEDTIME,
       }));
-
+  
       /* ---------------------------------------------------
          RESPONSE
       --------------------------------------------------- */
@@ -886,14 +929,13 @@ class OrgAdminController {
           total_cabinets: Number(
             cabinetsCount[0]?.cabinets["COUNT(ROWID)"] || 0
           ),
-          total_lockers: Number(lockersCount[0]?.lockers["COUNT(ROWID)"] || 0),
+          total_lockers: totalLockers,
           total_customers: Number(
             customersCount[0]?.users["COUNT(ROWID)"] || 0
           ),
           total_bookings: Number(
             bookingsCount[0]?.bookings["COUNT(ROWID)"] || 0
           ),
-
           branch_wise_lockers: branchWiseLockers,
           recent_branches: recentBranches,
           bookings_per_month: bookingsPerMonth,
@@ -908,6 +950,7 @@ class OrgAdminController {
       });
     }
   }
+  
 
   /* =====================================================
      ORGANIZATION GRAPH DATA
