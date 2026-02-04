@@ -1493,6 +1493,23 @@ class OrgAdminController {
       });
     }
   }
+  async getPlans(req,res){
+    try {
+      const query = `SELECT *FROM plans`;
+      const result = await this.zcql.executeZCQLQuery(query);
+      return res.status(200).json({
+        success:true,
+        data:result
+      })
+    } catch (error) {
+      console.error(error);
+      return res.status(500).json({
+        error:error?.message,
+        message:"Internal server Error"
+      })
+      
+    }
+  }
 }
 
 module.exports = OrgAdminController;

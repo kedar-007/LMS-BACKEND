@@ -88,8 +88,11 @@ router.get("/:orgId/bookings",(req,res) =>{
 // Buy / Upgrade subscription plan
 router.post("/:orgId/subscription", (req, res) => {
   return new OrgAdminController(req).subscribeToPlan(req, res);
-});
+}); 
 
+router.get("/get-plans",(req,res) =>{
+  return new OrgAdminController(req).getPlans(req,res);
+})
 // Get active subscription
 router.get("/:orgId/subscription", (req, res) => {
   return new OrgAdminController(req).getSubscription(req, res);
